@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
+	"unicode"
 )
 import "log"
 import "net/rpc"
@@ -17,6 +20,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -44,7 +55,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	case 1:
 		mapTask(reply, mapf)
 	case 2:
-		reduceTask(reply)
+		reduceTask(reply, reducef)
 	}
 }
 
@@ -77,6 +88,11 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 		fmt.Fprintf(intermediateFileNameFile[ihash(kv.Key)], "%v %v\n", kv.Key, kv.Value)
 	}
 
+	// close file
+	for i := 0; i < int(reply.NReduce); i++ {
+		intermediateFileNameFile[i].Close()
+	}
+
 	var mapDone *Send
 	mapDone.taskType = 1
 	mapDone.mapNumber = reply.mapNumber
@@ -84,12 +100,62 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	mapReduceCall(mapDone)
 }
 
-func reduceTask(reply *Reply) {
+func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	// when a reduce worker is notified by the master
 	// about these locations, it uses remote procedure
 	// calls to read the buffered data from the local
 	// disks of the map workers.
 
+	// RPC read
+	var rpcRead *Send
+	rpcRead.taskType = 2
+	rpcRead.reduceNumber = reply.reduceNumber
+
+	response := mapReduceCall(rpcRead)
+
+	// function to detect word separators.
+	ff := func(r rune) bool { return !unicode.IsLetter(r) }
+
+	// split contents into an array of words.
+	words := strings.FieldsFunc(string(response.bufferedData), ff)
+	intermediate := []KeyValue{}
+
+	for i := 0; i < len(words); i += 2 {
+		intermediate = append(intermediate, KeyValue{words[i], words[i+1]})
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + strconv.Itoa(reply.reduceNumber)
+	ofile, _ := os.Create(oname)
+
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+
+	var reduceDone *Send
+	reduceDone.reduceNumber = reply.reduceNumber
+	reduceDone.taskType = 3
+
+	mapReduceCall(reduceDone)
 }
 
 func mapReduceCall(sendMessage *Send) *Reply {
