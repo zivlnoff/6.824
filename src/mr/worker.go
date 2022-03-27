@@ -47,14 +47,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	// shakehand message
 	var shakehand *Send
-	shakehand.taskType = 0
+	shakehand.messageType = 0
 
 	reply := mapReduceCall(shakehand)
 
-	switch reply.taskType {
-	case 1:
+	switch reply.replyType {
+	case runMap:
 		mapTask(reply, mapf)
-	case 2:
+	case runReduce:
 		reduceTask(reply, reducef)
 	}
 }
@@ -65,16 +65,16 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	if err != nil {
 		log.Fatalf("cannot open %v", reply.inputFile)
 	}
+	defer file.Close()
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", reply.inputFile)
 	}
-	file.Close()
 
 	// concrete map
 	kva := mapf(reply.inputFile, string(content))
 
-	intermediateFileNamePrefix := "mr-" + strconv.Itoa(reply.mapNumber)
+	intermediateFileNamePrefix := "mr-" + strconv.Itoa(reply.mTNumber)
 
 	intermediateFileNameFile := make([]*os.File, reply.NReduce)
 
@@ -94,8 +94,11 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	}
 
 	var mapDone *Send
-	mapDone.taskType = 1
-	mapDone.mapNumber = reply.mapNumber
+	mapDone.messageType = mapCompleted
+	mapDone.mTNumber = reply.mTNumber
+	for i := 0; i < reply.NReduce; i++ {
+		mapDone.reducePartitions[i] = intermediateFileNameFile[i].Name()
+	}
 
 	mapReduceCall(mapDone)
 }
@@ -107,11 +110,11 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	// disks of the map workers.
 
 	// RPC read
-	var rpcRead *Send
-	rpcRead.taskType = 2
-	rpcRead.reduceNumber = reply.reduceNumber
+	var rpcReadReq *Send
+	rpcReadReq.messageType = rpcRead
+	rpcReadReq.rTNumber = reply.rTNumber
 
-	response := mapReduceCall(rpcRead)
+	response := mapReduceCall(rpcReadReq)
 
 	// function to detect word separators.
 	ff := func(r rune) bool { return !unicode.IsLetter(r) }
@@ -126,7 +129,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	sort.Sort(ByKey(intermediate))
 
-	oname := "mr-out-" + strconv.Itoa(reply.reduceNumber)
+	oname := "mr-out-" + strconv.Itoa(reply.rTNumber)
 	ofile, _ := os.Create(oname)
 
 	// call Reduce on each distinct key in intermediate[],
@@ -152,8 +155,8 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	ofile.Close()
 
 	var reduceDone *Send
-	reduceDone.reduceNumber = reply.reduceNumber
-	reduceDone.taskType = 3
+	reduceDone.messageType = reduceCompleted
+	reduceDone.rTNumber = reply.rTNumber
 
 	mapReduceCall(reduceDone)
 }
@@ -173,7 +176,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	ok := call("Coordinator.mapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.taskType %v\n", reply.taskType)
+		fmt.Printf("reply.messageType %v\n", reply.replyType)
 	} else {
 		fmt.Printf("call failed!\n")
 	}

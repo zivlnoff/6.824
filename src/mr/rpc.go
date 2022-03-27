@@ -12,29 +12,35 @@ import (
 import "strconv"
 
 type Send struct {
-	// sendType
-	taskType byte // 0 - shakehand		1 - mapDone		2 - reduceRPC read		3 - reduceDone
-
-	mapNumber       int
-	reducePartition []string
-	reduceNumber    int
+	// messageType
+	// 0 - idle request for ...
+	// 1 - map task completed
+	// 2 - reduceRPC read request
+	// 3 - reduce task completed
+	messageType      byte
+	mTNumber         int
+	rTNumber         int
+	reducePartitions []string
 }
 
 type Reply struct {
-	taskType byte // 1 - runMap		2 - runReduce		other - exit/go on
+	// replyType
+	// 1 - work for map task
+	// 2 - work for reduce task
+	// other - exit/go on/neverMind (decided by proto/scene)
+	replyType byte
 
 	// reply for mapTask
-	mapNumber int
-	inputFile string
+	mTNumber  int
 	NReduce   int
+	inputFile string
 
 	// reply for reduceTask the locations which RPC bases on
+	rTNumber          int
 	intermediateFiles []string //locations
-	reduceNumber      int
 
-	// what can i do ?
 	// reply for reduceTask the RPC request
-	bufferedData []byte //serialization can help us, right?
+	bufferedData []byte
 }
 
 // Add your RPC definitions here.
