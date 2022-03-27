@@ -164,6 +164,9 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	if c.jobStatus == done {
+		ret = true
+	}
 
 	return ret
 }
