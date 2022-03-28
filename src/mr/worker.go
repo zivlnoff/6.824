@@ -173,7 +173,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.mapReduce", &send, &reply)
+	ok := call("Coordinator.MapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
 		fmt.Printf("reply.MessageType %v\n", reply.ReplyType)

@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"io/ioutil"
 	"log"
 	"time"
@@ -51,12 +52,12 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
+// MapReduce
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (c *Coordinator) mapReduce(send *Send, reply *Reply) error {
+func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 	// watch MessageType
 	switch send.MessageType {
 	case IdleRequest:
@@ -144,15 +145,22 @@ func (c *Coordinator) mapReduce(send *Send, reply *Reply) error {
 //
 func (c *Coordinator) server() {
 	//// Register publishes the receiver's methods in the DefaultServer.
+	fmt.Println("rpc.Register")
 	rpc.Register(c)
+
+	fmt.Println("rpc.HandleHTTP")
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockName := coordinatorSock()
 	os.Remove(sockName)
+
+	fmt.Println("net.Listen")
 	l, e := net.Listen("unix", sockName)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+
+	fmt.Println("http.Serve")
 	go http.Serve(l, nil)
 }
 
