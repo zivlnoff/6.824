@@ -67,56 +67,72 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 	switch send.MessageType {
 	case IdleRequest:
 		// watch jobStatus
-		switch c.jobStatus {
+		c.rwMutex.RLock()
+		jobStatus := c.jobStatus
+		c.rwMutex.RUnlock()
+		switch jobStatus {
 		case Done:
 			return nil
 		case Forking:
+			// watch out for order
+			c.mTInProcess = tools.NewConcurrentMap()
+			c.mTCompleted = tools.NewConcurrentMap()
+
 			c.rwMutex.Lock()
 			c.jobStatus = Mapping
 			c.rwMutex.Unlock()
 
 			reply.ReplyType = Forward
-			c.mTInProcess = tools.NewConcurrentMap()
-			c.mTCompleted = tools.NewConcurrentMap()
 		case Mapping:
+			if c.mTIdle.Size() == 0 {
+				reply.ReplyType = Forward
+				break
+			}
+
 			// like 4, 3, 2, 1, 0 out in turn, fill reply first
 			reply.ReplyType = RunMap
-			reply.MtNumber = c.mTIdle.Size() - 1
+			reply.MtNumber = c.mTIdle.Random().(int)
 			reply.InputFile = c.inputFiles[reply.MtNumber]
 			reply.NReduce = c.nReduce
 
-			// change mapTasks status
+			// change mapTasks jobStatus
 			c.mTIdle.Delete(reply.MtNumber)
 			c.mTInProcess.Store(reply.MtNumber, time.AfterFunc(10*time.Second, func() {
-				//todo   you can call it worker failure
+				c.mTIdle.Store(reply.MtNumber, true)
+				c.mTInProcess.Delete(reply.MtNumber)
 			}))
 		case Reducing:
+			if c.rTIdle.Size() == 0 {
+				reply.ReplyType = Forward
+				break
+			}
 			reply.ReplyType = RunReduce
-			reply.RtNumber = c.rTIdle.Size() - 1
+			reply.RtNumber = c.rTIdle.Random().(int)
 
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
 
-			// change mapTasks status
+			// change mapTasks jobStatus
 			c.rTIdle.Delete(reply.RtNumber)
 			c.rTInProcess.Store(reply.RtNumber, time.AfterFunc(10*time.Second, func() {
-				//todo   you can call it worker failure
+				c.rTIdle.Store(reply.MtNumber, true)
+				c.rTInProcess.Delete(reply.MtNumber)
 			}))
 		}
 	case MapCompleted:
 		// fill reply
 		reply.ReplyType = Forward
 
-		// change mapTasks status
+		// change mapTasks jobStatus
 		c.mTInProcess.Delete(send.MtNumber)
 		c.mTCompleted.Store(send.MtNumber, true)
 		if c.mTCompleted.Size() == c.mMap {
+			c.rTInProcess = tools.NewConcurrentMap()
+			c.rTCompleted = tools.NewConcurrentMap()
+
 			c.rwMutex.Lock()
 			c.jobStatus = Reducing
 			c.rwMutex.Unlock()
-
-			c.rTInProcess = tools.NewConcurrentMap()
-			c.rTCompleted = tools.NewConcurrentMap()
 		}
 
 		// reserve for redirect the locations information
@@ -148,7 +164,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		// fill reply
 		reply.ReplyType = Forward // why am not Exit
 
-		// change reduceTask status
+		// change reduceTask jobStatus
 		c.rTInProcess.Delete(send.RtNumber)
 		c.rTCompleted.Store(send.RtNumber, true)
 		if c.rTCompleted.Size() == c.nReduce {

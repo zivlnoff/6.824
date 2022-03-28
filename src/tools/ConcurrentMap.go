@@ -1,6 +1,8 @@
 package tools
 
-import "sync"
+import (
+	"sync"
+)
 
 type any interface{}
 
@@ -50,5 +52,16 @@ func (rm *ConcurrentMap) Store(key any, value any) {
 }
 
 func (rm *ConcurrentMap) Size() int {
-	return rm.size
+	// forget add Lock...
+	rm.RLock()
+	size := rm.size
+	rm.RUnlock()
+	return size
+}
+
+func (rm *ConcurrentMap) Random() any {
+	for k, _ := range rm.entry {
+		return k
+	}
+	return nil
 }

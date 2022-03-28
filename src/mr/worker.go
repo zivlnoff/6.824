@@ -184,7 +184,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	ok := call("Coordinator.MapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
+		//fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
