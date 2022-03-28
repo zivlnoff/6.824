@@ -25,9 +25,10 @@ type Send struct {
 
 type Reply struct {
 	// ReplyType
-	// 1 - work for map task
-	// 2 - work for reduce task
-	// other - exit/go on/neverMind (decided by proto/scene)
+	// 1 - forward
+	// 2 - work for map task
+	// 3 - work for reduce task
+	// 0 - exit/neverMind (decided by proto/scene)
 	ReplyType byte
 
 	// reply for mapTask

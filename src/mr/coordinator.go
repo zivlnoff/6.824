@@ -13,18 +13,19 @@ import "net/http"
 
 const (
 	IdleRequest     byte = 0 // MessageType
-	mapCompleted    byte = 1
-	rpcRead         byte = 2
-	reduceCompleted byte = 3
+	MapCompleted    byte = 1
+	RpcRead         byte = 2
+	ReduceCompleted byte = 3
 
-	NeverMind byte = 0 // ReplyType
-	runMap    byte = 1
-	runReduce byte = 2
+	Forward   byte = 1 // ReplyType
+	RunMap    byte = 2
+	RunReduce byte = 3
+	Exit      byte = 0
 
-	done     byte = 0 // jobStatus
-	forking  byte = 1
-	mapping  byte = 2
-	reducing byte = 3
+	Done     byte = 0 // jobStatus
+	Forking  byte = 1
+	Mapping  byte = 2
+	Reducing byte = 3
 )
 
 type Coordinator struct {
@@ -63,13 +64,15 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 	case IdleRequest:
 		// watch jobStatus
 		switch c.jobStatus {
-		case done:
+		case Done:
 			return nil
-		case forking:
-			c.jobStatus = mapping
-		case mapping:
+		case Forking:
+			c.jobStatus = Mapping
+			reply.ReplyType = Forward
+			c.mTInProcess = make(map[int]*time.Timer)
+		case Mapping:
 			// like 4, 3, 2, 1, 0 out in turn, fill reply first
-			reply.ReplyType = runMap
+			reply.ReplyType = RunMap
 			reply.MtNumber = len(c.mTIdle) - 1
 			reply.InputFile = c.inputFiles[reply.MtNumber]
 			reply.NReduce = c.nReduce
@@ -79,8 +82,8 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 			c.mTInProcess[reply.MtNumber] = time.AfterFunc(10*time.Second, func() {
 				//todo   you can call it worker failure
 			})
-		case reducing:
-			reply.ReplyType = runReduce
+		case Reducing:
+			reply.ReplyType = RunReduce
 			reply.RtNumber = len(c.rTIdle) - 1
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
@@ -91,14 +94,15 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 				//todo   you can call it worker failure
 			})
 		}
-	case mapCompleted:
+	case MapCompleted:
 		// fill reply
-		reply.ReplyType = NeverMind
+		reply.ReplyType = Forward
 
 		// change mapTasks status
 		delete(c.mTInProcess, send.MtNumber)
 		if len(c.mTInProcess) == 0 {
-			c.jobStatus = reducing
+			c.jobStatus = Reducing
+			c.rTInProcess = make(map[int]*time.Timer)
 		}
 		c.mTCompleted[send.MtNumber] = true
 
@@ -106,7 +110,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		for index, v := range send.ReducePartitions {
 			c.intermediateFiles[index][send.MtNumber] = v
 		}
-	case rpcRead:
+	case RpcRead:
 		// fill reply
 		for i := 0; i < c.mMap; i++ {
 			file, err := os.Open(c.intermediateFiles[send.RtNumber][i])
@@ -126,14 +130,14 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 			// append []byte
 			reply.BufferedData = append(reply.BufferedData, content...)
 		}
-	case reduceCompleted:
+	case ReduceCompleted:
 		// fill reply
-		reply.ReplyType = NeverMind
+		reply.ReplyType = Forward // why am not Exit
 
 		// change reduceTask status
 		delete(c.rTInProcess, send.RtNumber)
 		if len(c.rTInProcess) == 0 {
-			c.jobStatus = done
+			c.jobStatus = Done
 		}
 		c.rTCompleted[send.RtNumber] = true
 	}
@@ -172,7 +176,7 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
-	if c.jobStatus == done {
+	if c.jobStatus == Done {
 		ret = true
 	}
 
@@ -191,7 +195,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.inputFiles = files //map pieces number == len(inputFiles)
 	c.mMap = len(files)
 	c.nReduce = nReduce
-	c.jobStatus = forking
+	c.jobStatus = Forking
 
 	// initialize mapTask status
 	c.mTIdle = make(map[int]bool)

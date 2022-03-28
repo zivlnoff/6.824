@@ -49,13 +49,19 @@ func Worker(mapf func(string, string) []KeyValue,
 	shakehand := Send{}
 	shakehand.MessageType = 0
 
-	reply := mapReduceCall(&shakehand)
+	for {
+		reply := mapReduceCall(&shakehand)
 
-	switch reply.ReplyType {
-	case runMap:
-		mapTask(reply, mapf)
-	case runReduce:
-		reduceTask(reply, reducef)
+		switch reply.ReplyType {
+		case Forward:
+			continue
+		case RunMap:
+			mapTask(reply, mapf)
+		case RunReduce:
+			reduceTask(reply, reducef)
+		case Exit:
+			break
+		}
 	}
 }
 
@@ -85,7 +91,7 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 
 	for _, kv := range kva {
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(intermediateFileNameFile[ihash(kv.Key)], "%v %v\n", kv.Key, kv.Value)
+		fmt.Fprintf(intermediateFileNameFile[ihash(kv.Key)%reply.NReduce], "%v %v\n", kv.Key, kv.Value)
 	}
 
 	// close file
@@ -94,7 +100,7 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	}
 
 	var mapDone *Send
-	mapDone.MessageType = mapCompleted
+	mapDone.MessageType = MapCompleted
 	mapDone.MtNumber = reply.MtNumber
 	for i := 0; i < reply.NReduce; i++ {
 		mapDone.ReducePartitions[i] = intermediateFileNameFile[i].Name()
@@ -111,7 +117,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	// RPC read
 	var rpcReadReq *Send
-	rpcReadReq.MessageType = rpcRead
+	rpcReadReq.MessageType = RpcRead
 	rpcReadReq.RtNumber = reply.RtNumber
 
 	response := mapReduceCall(rpcReadReq)
@@ -155,7 +161,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	ofile.Close()
 
 	var reduceDone *Send
-	reduceDone.MessageType = reduceCompleted
+	reduceDone.MessageType = ReduceCompleted
 	reduceDone.RtNumber = reply.RtNumber
 
 	mapReduceCall(reduceDone)
