@@ -70,6 +70,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 			c.jobStatus = Mapping
 			reply.ReplyType = Forward
 			c.mTInProcess = make(map[int]*time.Timer)
+			c.mTCompleted = make(map[int]bool)
 		case Mapping:
 			// like 4, 3, 2, 1, 0 out in turn, fill reply first
 			reply.ReplyType = RunMap
@@ -100,11 +101,12 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 
 		// change mapTasks status
 		delete(c.mTInProcess, send.MtNumber)
-		if len(c.mTInProcess) == 0 {
+		c.mTCompleted[send.MtNumber] = true
+		if len(c.mTCompleted) == c.mMap {
 			c.jobStatus = Reducing
 			c.rTInProcess = make(map[int]*time.Timer)
+			c.rTCompleted = make(map[int]bool)
 		}
-		c.mTCompleted[send.MtNumber] = true
 
 		// reserve for redirect the locations information
 		for index, v := range send.ReducePartitions {
@@ -136,7 +138,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 
 		// change reduceTask status
 		delete(c.rTInProcess, send.RtNumber)
-		if len(c.rTInProcess) == 0 {
+		if len(c.rTCompleted) == c.nReduce {
 			c.jobStatus = Done
 		}
 		c.rTCompleted[send.RtNumber] = true
@@ -205,7 +207,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// initialize IntermediateFiles array
 	c.intermediateFiles = make([][]string, nReduce)
-	for i := 0; i < len(files); i++ {
+	for i := 0; i < nReduce; i++ {
 		c.intermediateFiles[i] = make([]string, len(files))
 	}
 

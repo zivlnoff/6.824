@@ -94,19 +94,21 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 		fmt.Fprintf(intermediateFileNameFile[ihash(kv.Key)%reply.NReduce], "%v %v\n", kv.Key, kv.Value)
 	}
 
+	mapDone := Send{}
+	mapDone.MessageType = MapCompleted
+	mapDone.MtNumber = reply.MtNumber
+	mapDone.ReducePartitions = make([]string, reply.NReduce)
+
+	for i := 0; i < reply.NReduce; i++ {
+		mapDone.ReducePartitions[i] = intermediateFileNameFile[i].Name()
+	}
+
 	// close file
 	for i := 0; i < int(reply.NReduce); i++ {
 		intermediateFileNameFile[i].Close()
 	}
 
-	var mapDone *Send
-	mapDone.MessageType = MapCompleted
-	mapDone.MtNumber = reply.MtNumber
-	for i := 0; i < reply.NReduce; i++ {
-		mapDone.ReducePartitions[i] = intermediateFileNameFile[i].Name()
-	}
-
-	mapReduceCall(mapDone)
+	mapReduceCall(&mapDone)
 }
 
 func reduceTask(reply *Reply, reducef func(string, []string) string) {
@@ -116,19 +118,20 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	// disks of the map workers.
 
 	// RPC read
-	var rpcReadReq *Send
+	rpcReadReq := Send{}
 	rpcReadReq.MessageType = RpcRead
 	rpcReadReq.RtNumber = reply.RtNumber
 
-	response := mapReduceCall(rpcReadReq)
+	response := mapReduceCall(&rpcReadReq)
 
 	// function to detect word separators.
-	ff := func(r rune) bool { return !unicode.IsLetter(r) }
+	ff := func(r rune) bool { return (!unicode.IsLetter(r) && !unicode.IsNumber(r)) }
 
 	// split contents into an array of words.
 	words := strings.FieldsFunc(string(response.BufferedData), ff)
 	intermediate := []KeyValue{}
 
+	fmt.Println(len(words))
 	for i := 0; i < len(words); i += 2 {
 		intermediate = append(intermediate, KeyValue{words[i], words[i+1]})
 	}
@@ -160,11 +163,11 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	ofile.Close()
 
-	var reduceDone *Send
+	reduceDone := Send{}
 	reduceDone.MessageType = ReduceCompleted
 	reduceDone.RtNumber = reply.RtNumber
 
-	mapReduceCall(reduceDone)
+	mapReduceCall(&reduceDone)
 }
 
 func mapReduceCall(sendMessage *Send) *Reply {
