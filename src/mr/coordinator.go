@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"sync"
 	"time"
 )
 import "net"
@@ -14,13 +15,14 @@ import "net/http"
 const (
 	IdleRequest     byte = 0 // MessageType
 	MapCompleted    byte = 1
-	RpcRead         byte = 2
+	RpcReadCall     byte = 2
 	ReduceCompleted byte = 3
 
-	Forward   byte = 1 // ReplyType
-	RunMap    byte = 2
-	RunReduce byte = 3
-	Exit      byte = 0
+	Forward       byte = 1 // ReplyType
+	RunMap        byte = 2
+	RunReduce     byte = 3
+	RpcReadResult byte = 4
+	Exit          byte = 0
 
 	Done     byte = 0 // jobStatus
 	Forking  byte = 1
@@ -48,6 +50,7 @@ type Coordinator struct {
 	rTCompleted map[int]bool
 
 	// job status
+	rwMutex   *sync.RWMutex
 	jobStatus byte
 }
 
@@ -67,7 +70,10 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		case Done:
 			return nil
 		case Forking:
+			c.rwMutex.Lock()
 			c.jobStatus = Mapping
+			c.rwMutex.Unlock()
+
 			reply.ReplyType = Forward
 			c.mTInProcess = make(map[int]*time.Timer)
 			c.mTCompleted = make(map[int]bool)
@@ -86,6 +92,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		case Reducing:
 			reply.ReplyType = RunReduce
 			reply.RtNumber = len(c.rTIdle) - 1
+
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
 
@@ -103,7 +110,10 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		delete(c.mTInProcess, send.MtNumber)
 		c.mTCompleted[send.MtNumber] = true
 		if len(c.mTCompleted) == c.mMap {
+			c.rwMutex.Lock()
 			c.jobStatus = Reducing
+			c.rwMutex.Unlock()
+
 			c.rTInProcess = make(map[int]*time.Timer)
 			c.rTCompleted = make(map[int]bool)
 		}
@@ -112,8 +122,9 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		for index, v := range send.ReducePartitions {
 			c.intermediateFiles[index][send.MtNumber] = v
 		}
-	case RpcRead:
+	case RpcReadCall:
 		// fill reply
+		reply.ReplyType = RpcReadResult
 		for i := 0; i < c.mMap; i++ {
 			file, err := os.Open(c.intermediateFiles[send.RtNumber][i])
 			if err != nil {
@@ -138,10 +149,12 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 
 		// change reduceTask status
 		delete(c.rTInProcess, send.RtNumber)
-		if len(c.rTCompleted) == c.nReduce {
-			c.jobStatus = Done
-		}
 		c.rTCompleted[send.RtNumber] = true
+		if len(c.rTCompleted) == c.nReduce {
+			c.rwMutex.Lock()
+			c.jobStatus = Done
+			c.rwMutex.Unlock()
+		}
 	}
 	return nil
 }
@@ -178,9 +191,11 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	c.rwMutex.RLock()
 	if c.jobStatus == Done {
 		ret = true
 	}
+	c.rwMutex.RUnlock()
 
 	return ret
 }
@@ -197,6 +212,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.inputFiles = files //map pieces number == len(inputFiles)
 	c.mMap = len(files)
 	c.nReduce = nReduce
+	c.rwMutex = new(sync.RWMutex)
 	c.jobStatus = Forking
 
 	// initialize mapTask status

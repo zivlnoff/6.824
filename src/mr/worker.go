@@ -60,7 +60,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case RunReduce:
 			reduceTask(reply, reducef)
 		case Exit:
-			break
+			return
 		}
 	}
 }
@@ -119,7 +119,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	// RPC read
 	rpcReadReq := Send{}
-	rpcReadReq.MessageType = RpcRead
+	rpcReadReq.MessageType = RpcReadCall
 	rpcReadReq.RtNumber = reply.RtNumber
 
 	response := mapReduceCall(&rpcReadReq)
@@ -131,7 +131,6 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	words := strings.FieldsFunc(string(response.BufferedData), ff)
 	intermediate := []KeyValue{}
 
-	fmt.Println(len(words))
 	for i := 0; i < len(words); i += 2 {
 		intermediate = append(intermediate, KeyValue{words[i], words[i+1]})
 	}
