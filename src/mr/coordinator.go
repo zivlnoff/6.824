@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"6.824/tools"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -37,17 +38,17 @@ type Coordinator struct {
 	nReduce    int
 
 	// record mapTask status information
-	mTIdle      map[int]bool
-	mTInProcess map[int]*time.Timer
-	mTCompleted map[int]bool
+	mTIdle      *tools.ConcurrentMap
+	mTInProcess *tools.ConcurrentMap
+	mTCompleted *tools.ConcurrentMap
 
 	// the locations of the buffered pairs on the local disk
 	intermediateFiles [][]string
 
 	// record reduceTask status information
-	rTIdle      map[int]bool
-	rTInProcess map[int]*time.Timer
-	rTCompleted map[int]bool
+	rTIdle      *tools.ConcurrentMap
+	rTInProcess *tools.ConcurrentMap
+	rTCompleted *tools.ConcurrentMap
 
 	// job status
 	rwMutex   *sync.RWMutex
@@ -75,47 +76,47 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 			c.rwMutex.Unlock()
 
 			reply.ReplyType = Forward
-			c.mTInProcess = make(map[int]*time.Timer)
-			c.mTCompleted = make(map[int]bool)
+			c.mTInProcess = tools.NewConcurrentMap()
+			c.mTCompleted = tools.NewConcurrentMap()
 		case Mapping:
 			// like 4, 3, 2, 1, 0 out in turn, fill reply first
 			reply.ReplyType = RunMap
-			reply.MtNumber = len(c.mTIdle) - 1
+			reply.MtNumber = c.mTIdle.Size() - 1
 			reply.InputFile = c.inputFiles[reply.MtNumber]
 			reply.NReduce = c.nReduce
 
 			// change mapTasks status
-			delete(c.mTIdle, reply.MtNumber)
-			c.mTInProcess[reply.MtNumber] = time.AfterFunc(10*time.Second, func() {
+			c.mTIdle.Delete(reply.MtNumber)
+			c.mTInProcess.Store(reply.MtNumber, time.AfterFunc(10*time.Second, func() {
 				//todo   you can call it worker failure
-			})
+			}))
 		case Reducing:
 			reply.ReplyType = RunReduce
-			reply.RtNumber = len(c.rTIdle) - 1
+			reply.RtNumber = c.rTIdle.Size() - 1
 
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
 
 			// change mapTasks status
-			delete(c.rTIdle, reply.RtNumber)
-			c.rTInProcess[reply.RtNumber] = time.AfterFunc(10*time.Second, func() {
+			c.rTIdle.Delete(reply.RtNumber)
+			c.rTInProcess.Store(reply.RtNumber, time.AfterFunc(10*time.Second, func() {
 				//todo   you can call it worker failure
-			})
+			}))
 		}
 	case MapCompleted:
 		// fill reply
 		reply.ReplyType = Forward
 
 		// change mapTasks status
-		delete(c.mTInProcess, send.MtNumber)
-		c.mTCompleted[send.MtNumber] = true
-		if len(c.mTCompleted) == c.mMap {
+		c.mTInProcess.Delete(send.MtNumber)
+		c.mTCompleted.Store(send.MtNumber, true)
+		if c.mTCompleted.Size() == c.mMap {
 			c.rwMutex.Lock()
 			c.jobStatus = Reducing
 			c.rwMutex.Unlock()
 
-			c.rTInProcess = make(map[int]*time.Timer)
-			c.rTCompleted = make(map[int]bool)
+			c.rTInProcess = tools.NewConcurrentMap()
+			c.rTCompleted = tools.NewConcurrentMap()
 		}
 
 		// reserve for redirect the locations information
@@ -148,9 +149,9 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		reply.ReplyType = Forward // why am not Exit
 
 		// change reduceTask status
-		delete(c.rTInProcess, send.RtNumber)
-		c.rTCompleted[send.RtNumber] = true
-		if len(c.rTCompleted) == c.nReduce {
+		c.rTInProcess.Delete(send.RtNumber)
+		c.rTCompleted.Store(send.RtNumber, true)
+		if c.rTCompleted.Size() == c.nReduce {
 			c.rwMutex.Lock()
 			c.jobStatus = Done
 			c.rwMutex.Unlock()
@@ -216,9 +217,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.jobStatus = Forking
 
 	// initialize mapTask status
-	c.mTIdle = make(map[int]bool)
+	c.mTIdle = tools.NewConcurrentMap()
 	for i := 0; i < len(files); i++ {
-		c.mTIdle[i] = true
+		c.mTIdle.Store(i, true)
 	}
 
 	// initialize IntermediateFiles array
@@ -228,9 +229,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	// initialize reduceTask status
-	c.rTIdle = make(map[int]bool)
+	c.rTIdle = tools.NewConcurrentMap()
 	for i := 0; i < nReduce; i++ {
-		c.rTIdle[i] = true
+		c.rTIdle.Store(i, true)
 	}
 
 	c.server()
