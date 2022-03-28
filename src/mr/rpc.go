@@ -12,35 +12,35 @@ import (
 import "strconv"
 
 type Send struct {
-	// messageType
+	// MessageType
 	// 0 - idle request for ...
 	// 1 - map task completed
 	// 2 - reduceRPC read request
 	// 3 - reduce task completed
-	messageType      byte
-	mTNumber         int
-	rTNumber         int
-	reducePartitions []string
+	MessageType      byte
+	MtNumber         int
+	RtNumber         int
+	ReducePartitions []string
 }
 
 type Reply struct {
-	// replyType
+	// ReplyType
 	// 1 - work for map task
 	// 2 - work for reduce task
 	// other - exit/go on/neverMind (decided by proto/scene)
-	replyType byte
+	ReplyType byte
 
 	// reply for mapTask
-	mTNumber  int
+	MtNumber  int
 	NReduce   int
-	inputFile string
+	InputFile string
 
 	// reply for reduceTask the locations which RPC bases on
-	rTNumber          int
-	intermediateFiles []string //locations
+	RtNumber          int
+	IntermediateFiles []string //locations
 
 	// reply for reduceTask the RPC request
-	bufferedData []byte
+	BufferedData []byte
 }
 
 // Add your RPC definitions here.

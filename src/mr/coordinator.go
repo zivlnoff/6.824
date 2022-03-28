@@ -11,12 +11,12 @@ import "net/rpc"
 import "net/http"
 
 const (
-	IdleRequest     byte = 0 // messageType
+	IdleRequest     byte = 0 // MessageType
 	mapCompleted    byte = 1
 	rpcRead         byte = 2
 	reduceCompleted byte = 3
 
-	NeverMind byte = 0 // replyType
+	NeverMind byte = 0 // ReplyType
 	runMap    byte = 1
 	runReduce byte = 2
 
@@ -57,8 +57,8 @@ type Coordinator struct {
 // the RPC argument and reply types are defined in rpc.go.
 //
 func (c *Coordinator) mapReduce(send *Send, reply *Reply) error {
-	// watch messageType
-	switch send.messageType {
+	// watch MessageType
+	switch send.MessageType {
 	case IdleRequest:
 		// watch jobStatus
 		switch c.jobStatus {
@@ -68,73 +68,73 @@ func (c *Coordinator) mapReduce(send *Send, reply *Reply) error {
 			c.jobStatus = mapping
 		case mapping:
 			// like 4, 3, 2, 1, 0 out in turn, fill reply first
-			reply.replyType = runMap
-			reply.mTNumber = len(c.mTIdle) - 1
-			reply.inputFile = c.inputFiles[reply.mTNumber]
+			reply.ReplyType = runMap
+			reply.MtNumber = len(c.mTIdle) - 1
+			reply.InputFile = c.inputFiles[reply.MtNumber]
 			reply.NReduce = c.nReduce
 
 			// change mapTasks status
-			delete(c.mTIdle, reply.mTNumber)
-			c.mTInProcess[reply.mTNumber] = time.AfterFunc(10*time.Second, func() {
+			delete(c.mTIdle, reply.MtNumber)
+			c.mTInProcess[reply.MtNumber] = time.AfterFunc(10*time.Second, func() {
 				//todo   you can call it worker failure
 			})
 		case reducing:
-			reply.replyType = runReduce
-			reply.rTNumber = len(c.rTIdle) - 1
-			reply.intermediateFiles = c.intermediateFiles[reply.rTNumber]
+			reply.ReplyType = runReduce
+			reply.RtNumber = len(c.rTIdle) - 1
+			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
 
 			// change mapTasks status
-			delete(c.rTIdle, reply.rTNumber)
-			c.rTInProcess[reply.rTNumber] = time.AfterFunc(10*time.Second, func() {
+			delete(c.rTIdle, reply.RtNumber)
+			c.rTInProcess[reply.RtNumber] = time.AfterFunc(10*time.Second, func() {
 				//todo   you can call it worker failure
 			})
 		}
 	case mapCompleted:
 		// fill reply
-		reply.replyType = NeverMind
+		reply.ReplyType = NeverMind
 
 		// change mapTasks status
-		delete(c.mTInProcess, send.mTNumber)
+		delete(c.mTInProcess, send.MtNumber)
 		if len(c.mTInProcess) == 0 {
 			c.jobStatus = reducing
 		}
-		c.mTCompleted[send.mTNumber] = true
+		c.mTCompleted[send.MtNumber] = true
 
 		// reserve for redirect the locations information
-		for index, v := range send.reducePartitions {
-			c.intermediateFiles[index][send.mTNumber] = v
+		for index, v := range send.ReducePartitions {
+			c.intermediateFiles[index][send.MtNumber] = v
 		}
 	case rpcRead:
 		// fill reply
 		for i := 0; i < c.mMap; i++ {
-			file, err := os.Open(c.intermediateFiles[send.rTNumber][i])
+			file, err := os.Open(c.intermediateFiles[send.RtNumber][i])
 			if err != nil {
-				log.Fatalf("cannot open %v", reply.inputFile)
+				log.Fatalf("cannot open %v", reply.InputFile)
 			}
 			content, err := ioutil.ReadAll(file)
 			if err != nil {
-				log.Fatalf("cannot read %v", reply.inputFile)
+				log.Fatalf("cannot read %v", reply.InputFile)
 			}
 
 			err = file.Close()
 			if err != nil {
-				log.Fatalf("cannot close %v", reply.inputFile)
+				log.Fatalf("cannot close %v", reply.InputFile)
 			}
 
 			// append []byte
-			reply.bufferedData = append(reply.bufferedData, content...)
+			reply.BufferedData = append(reply.BufferedData, content...)
 		}
 	case reduceCompleted:
 		// fill reply
-		reply.replyType = NeverMind
+		reply.ReplyType = NeverMind
 
 		// change reduceTask status
-		delete(c.rTInProcess, send.rTNumber)
+		delete(c.rTInProcess, send.RtNumber)
 		if len(c.rTInProcess) == 0 {
 			c.jobStatus = done
 		}
-		c.rTCompleted[send.rTNumber] = true
+		c.rTCompleted[send.RtNumber] = true
 	}
 	return nil
 }
@@ -186,17 +186,19 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.jobStatus = forking
 
 	// initialize mapTask status
+	c.mTIdle = make(map[int]bool)
 	for i := 0; i < len(files); i++ {
 		c.mTIdle[i] = true
 	}
 
-	// initialize intermediateFiles array
+	// initialize IntermediateFiles array
 	c.intermediateFiles = make([][]string, nReduce)
 	for i := 0; i < len(files); i++ {
 		c.intermediateFiles[i] = make([]string, len(files))
 	}
 
 	// initialize reduceTask status
+	c.rTIdle = make(map[int]bool)
 	for i := 0; i < nReduce; i++ {
 		c.rTIdle[i] = true
 	}

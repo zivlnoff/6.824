@@ -46,12 +46,12 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	// shakehand message
-	var shakehand *Send
-	shakehand.messageType = 0
+	shakehand := Send{}
+	shakehand.MessageType = 0
 
-	reply := mapReduceCall(shakehand)
+	reply := mapReduceCall(&shakehand)
 
-	switch reply.replyType {
+	switch reply.ReplyType {
 	case runMap:
 		mapTask(reply, mapf)
 	case runReduce:
@@ -61,20 +61,20 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	// open file and read data
-	file, err := os.Open(reply.inputFile)
+	file, err := os.Open(reply.InputFile)
 	if err != nil {
-		log.Fatalf("cannot open %v", reply.inputFile)
+		log.Fatalf("cannot open %v", reply.InputFile)
 	}
 	defer file.Close()
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", reply.inputFile)
+		log.Fatalf("cannot read %v", reply.InputFile)
 	}
 
 	// concrete map
-	kva := mapf(reply.inputFile, string(content))
+	kva := mapf(reply.InputFile, string(content))
 
-	intermediateFileNamePrefix := "mr-" + strconv.Itoa(reply.mTNumber)
+	intermediateFileNamePrefix := "mr-" + strconv.Itoa(reply.MtNumber)
 
 	intermediateFileNameFile := make([]*os.File, reply.NReduce)
 
@@ -94,10 +94,10 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	}
 
 	var mapDone *Send
-	mapDone.messageType = mapCompleted
-	mapDone.mTNumber = reply.mTNumber
+	mapDone.MessageType = mapCompleted
+	mapDone.MtNumber = reply.MtNumber
 	for i := 0; i < reply.NReduce; i++ {
-		mapDone.reducePartitions[i] = intermediateFileNameFile[i].Name()
+		mapDone.ReducePartitions[i] = intermediateFileNameFile[i].Name()
 	}
 
 	mapReduceCall(mapDone)
@@ -111,8 +111,8 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	// RPC read
 	var rpcReadReq *Send
-	rpcReadReq.messageType = rpcRead
-	rpcReadReq.rTNumber = reply.rTNumber
+	rpcReadReq.MessageType = rpcRead
+	rpcReadReq.RtNumber = reply.RtNumber
 
 	response := mapReduceCall(rpcReadReq)
 
@@ -120,7 +120,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	ff := func(r rune) bool { return !unicode.IsLetter(r) }
 
 	// split contents into an array of words.
-	words := strings.FieldsFunc(string(response.bufferedData), ff)
+	words := strings.FieldsFunc(string(response.BufferedData), ff)
 	intermediate := []KeyValue{}
 
 	for i := 0; i < len(words); i += 2 {
@@ -129,7 +129,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	sort.Sort(ByKey(intermediate))
 
-	oname := "mr-out-" + strconv.Itoa(reply.rTNumber)
+	oname := "mr-out-" + strconv.Itoa(reply.RtNumber)
 	ofile, _ := os.Create(oname)
 
 	// call Reduce on each distinct key in intermediate[],
@@ -155,8 +155,8 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	ofile.Close()
 
 	var reduceDone *Send
-	reduceDone.messageType = reduceCompleted
-	reduceDone.rTNumber = reply.rTNumber
+	reduceDone.MessageType = reduceCompleted
+	reduceDone.RtNumber = reply.RtNumber
 
 	mapReduceCall(reduceDone)
 }
@@ -176,7 +176,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	ok := call("Coordinator.mapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.messageType %v\n", reply.replyType)
+		fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
