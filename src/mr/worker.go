@@ -1,13 +1,12 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
-	"strings"
-	"unicode"
 )
 import "log"
 import "net/rpc"
@@ -83,15 +82,16 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	intermediateFileNamePrefix := "mr-" + strconv.Itoa(reply.MtNumber)
 
 	intermediateFileNameFile := make([]*os.File, reply.NReduce)
+	intermediateFileEncoder := make([]*json.Encoder, reply.NReduce)
 
 	// create intermediate files
 	for i := 0; i < int(reply.NReduce); i++ {
 		intermediateFileNameFile[i], _ = os.Create(intermediateFileNamePrefix + "-" + strconv.Itoa(i))
+		intermediateFileEncoder[i] = json.NewEncoder(intermediateFileNameFile[i])
 	}
 
 	for _, kv := range kva {
-		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(intermediateFileNameFile[ihash(kv.Key)%reply.NReduce], "%v %v\n", kv.Key, kv.Value)
+		intermediateFileEncoder[ihash(kv.Key)%reply.NReduce].Encode(kv)
 	}
 
 	mapDone := Send{}
@@ -124,17 +124,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	response := mapReduceCall(&rpcReadReq)
 
-	// function to detect word separators.
-	ff := func(r rune) bool { return (!unicode.IsLetter(r) && !unicode.IsNumber(r)) }
-
-	// split contents into an array of words.
-	words := strings.FieldsFunc(string(response.BufferedData), ff)
-	intermediate := []KeyValue{}
-
-	for i := 0; i < len(words); i += 2 {
-		intermediate = append(intermediate, KeyValue{words[i], words[i+1]})
-	}
-
+	intermediate := response.BufferedData
 	sort.Sort(ByKey(intermediate))
 
 	oname := "mr-out-" + strconv.Itoa(reply.RtNumber)
@@ -184,7 +174,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	ok := call("Coordinator.MapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
-		//fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
+		fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
 	} else {
 		fmt.Printf("call failed!\n")
 	}

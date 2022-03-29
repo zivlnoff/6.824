@@ -41,7 +41,7 @@ type Reply struct {
 	IntermediateFiles []string //locations
 
 	// reply for reduceTask the RPC request
-	BufferedData []byte
+	BufferedData []KeyValue
 }
 
 // Add your RPC definitions here.

@@ -2,8 +2,8 @@ package mr
 
 import (
 	"6.824/tools"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"sync"
 	"time"
@@ -142,23 +142,25 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 	case RpcReadCall:
 		// fill reply
 		reply.ReplyType = RpcReadResult
+
+		decoder := make([]*json.Decoder, c.mMap)
 		for i := 0; i < c.mMap; i++ {
 			file, err := os.Open(c.intermediateFiles[send.RtNumber][i])
 			if err != nil {
 				log.Fatalf("cannot open %v", reply.InputFile)
+				break
 			}
-			content, err := ioutil.ReadAll(file)
-			if err != nil {
-				log.Fatalf("cannot read %v", reply.InputFile)
+			decoder[i] = json.NewDecoder(file)
+			for decoder[i].More() {
+				kva := KeyValue{}
+				err = decoder[i].Decode(&kva)
+				if err != nil {
+					fmt.Println("decode failed, err=", err)
+					break
+				}
+				reply.BufferedData = append(reply.BufferedData, kva)
 			}
-
-			err = file.Close()
-			if err != nil {
-				log.Fatalf("cannot close %v", reply.InputFile)
-			}
-
-			// append []byte
-			reply.BufferedData = append(reply.BufferedData, content...)
+			file.Close()
 		}
 	case ReduceCompleted:
 		// fill reply
