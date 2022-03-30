@@ -84,14 +84,15 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 
 			reply.ReplyType = Forward
 		case Mapping:
-			if c.mTIdle.Size() == 0 {
+			// like 4, 3, 2, 1, 0 out in turn, fill reply first
+			mtNumber := c.mTIdle.Random()
+			if mtNumber == nil {
 				reply.ReplyType = Forward
 				break
 			}
-
-			// like 4, 3, 2, 1, 0 out in turn, fill reply first
 			reply.ReplyType = RunMap
-			reply.MtNumber = c.mTIdle.Random().(int)
+			reply.MtNumber = mtNumber.(int)
+
 			reply.InputFile = c.inputFiles[reply.MtNumber]
 			reply.NReduce = c.nReduce
 
@@ -102,12 +103,13 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 				c.mTInProcess.Delete(reply.MtNumber)
 			}))
 		case Reducing:
-			if c.rTIdle.Size() == 0 {
+			rtNumber := c.rTIdle.Random()
+			if rtNumber == nil {
 				reply.ReplyType = Forward
 				break
 			}
 			reply.ReplyType = RunReduce
-			reply.RtNumber = c.rTIdle.Random().(int)
+			reply.RtNumber = rtNumber.(int)
 
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
