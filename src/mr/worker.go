@@ -103,9 +103,9 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 		intermediateFileNameFile[i].Close()
 		newPath := rootedPath + "/" + intermediateFileNamePrefix + "-" + strconv.Itoa(i)
 		err = os.Rename(intermediateFileNameFile[i].Name(), newPath)
-		if err != nil {
-			log.Fatalf("can't rename %v", err)
-		}
+		//if err != nil {
+		//	log.Fatalf("can't rename %v", err)
+		//}
 		mapDone.ReducePartitions[i] = newPath
 	}
 
@@ -178,8 +178,14 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	if ok {
 		// reply.Y should be 100.
 		//fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
+		//if reply.MtNumber != 0 {
+		//	fmt.Printf("reply.MtNumber %v\n", reply.MtNumber)
+		//}
+		//if reply.RtNumber != 0 {
+		//	fmt.Printf("reply.RtNumber %v\n", reply.RtNumber)
+		//}
 	} else {
-		fmt.Printf("call failed!\n")
+		fmt.Printf("call failed! \n")
 	}
 
 	return &reply

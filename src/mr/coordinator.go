@@ -90,6 +90,7 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 				reply.ReplyType = Forward
 				break
 			}
+
 			reply.ReplyType = RunMap
 			reply.MtNumber = mtNumber.(int)
 
@@ -108,17 +109,18 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 				reply.ReplyType = Forward
 				break
 			}
+
 			reply.ReplyType = RunReduce
 			reply.RtNumber = rtNumber.(int)
 
 			reply.IntermediateFiles = c.intermediateFiles[reply.RtNumber]
 			reply.NReduce = c.nReduce
 
-			// change mapTasks jobStatus
+			// change reduceTasks jobStatus
 			c.rTIdle.Delete(reply.RtNumber)
 			c.rTInProcess.Store(reply.RtNumber, time.AfterFunc(10*time.Second, func() {
-				c.rTIdle.Store(reply.MtNumber, true)
-				c.rTInProcess.Delete(reply.MtNumber)
+				c.rTIdle.Store(reply.RtNumber, true)
+				c.rTInProcess.Delete(reply.RtNumber)
 			}))
 		}
 	case MapCompleted:
@@ -128,7 +130,11 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		// change mapTasks jobStatus
 		//todo solve machine recover question, maybe machine UID
 		timer, _ := c.mTInProcess.Load(send.MtNumber)
-		timer.(*time.Timer).Stop()
+		if timer != nil {
+			timer.(*time.Timer).Stop()
+		} else {
+			break
+		}
 		c.mTInProcess.Delete(send.MtNumber)
 		c.mTCompleted.Store(send.MtNumber, true)
 		if c.mTCompleted.Size() == c.mMap {
@@ -170,6 +176,13 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		reply.ReplyType = Forward // why am not Exit
 
 		// change reduceTask jobStatus
+		//todo solve machine recover question, maybe machine UID
+		timer, _ := c.rTInProcess.Load(send.RtNumber)
+		if timer != nil {
+			timer.(*time.Timer).Stop()
+		} else {
+			break
+		}
 		c.rTInProcess.Delete(send.RtNumber)
 		c.rTCompleted.Store(send.RtNumber, true)
 		if c.rTCompleted.Size() == c.nReduce {
