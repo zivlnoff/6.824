@@ -85,7 +85,7 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	intermediateFileEncoder := make([]*json.Encoder, reply.NReduce)
 	// create intermediate files
 	for i := 0; i < int(reply.NReduce); i++ {
-		intermediateFileNameFile[i], _ = os.Create(intermediateFileNamePrefix + "-" + strconv.Itoa(i))
+		intermediateFileNameFile[i], _ = ioutil.TempFile("", "*")
 		intermediateFileEncoder[i] = json.NewEncoder(intermediateFileNameFile[i])
 	}
 
@@ -98,13 +98,15 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 	mapDone.MtNumber = reply.MtNumber
 	mapDone.ReducePartitions = make([]string, reply.NReduce)
 
+	rootedPath, err := os.Getwd()
 	for i := 0; i < reply.NReduce; i++ {
-		mapDone.ReducePartitions[i] = intermediateFileNameFile[i].Name()
-	}
-
-	// close file
-	for i := 0; i < int(reply.NReduce); i++ {
 		intermediateFileNameFile[i].Close()
+		newPath := rootedPath + "/" + intermediateFileNamePrefix + "-" + strconv.Itoa(i)
+		err = os.Rename(intermediateFileNameFile[i].Name(), newPath)
+		if err != nil {
+			log.Fatalf("can't rename %v", err)
+		}
+		mapDone.ReducePartitions[i] = newPath
 	}
 
 	mapReduceCall(&mapDone)
@@ -127,8 +129,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 	sort.Sort(ByKey(intermediate))
 
 	oname := "mr-out-" + strconv.Itoa(reply.RtNumber)
-	ofile, _ := os.Create(oname)
-	defer ofile.Close()
+	tmpFile, _ := ioutil.TempFile("", "*")
 
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-0.
@@ -145,10 +146,14 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 		output := reducef(intermediate[i].Key, values)
 
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		fmt.Fprintf(tmpFile, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
+
+	tmpFile.Close()
+	rootedPath, _ := os.Getwd()
+	os.Rename(tmpFile.Name(), rootedPath+"/"+oname)
 
 	reduceDone := Send{}
 	reduceDone.MessageType = ReduceCompleted
