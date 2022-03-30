@@ -124,6 +124,9 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 		reply.ReplyType = Forward
 
 		// change mapTasks jobStatus
+		//todo solve machine recover question, maybe machine UID
+		timer, _ := c.mTInProcess.Load(send.MtNumber)
+		timer.(*time.Timer).Stop()
 		c.mTInProcess.Delete(send.MtNumber)
 		c.mTCompleted.Store(send.MtNumber, true)
 		if c.mTCompleted.Size() == c.mMap {
@@ -148,7 +151,6 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 			file, err := os.Open(c.intermediateFiles[send.RtNumber][i])
 			if err != nil {
 				log.Fatalf("cannot open %v", reply.InputFile)
-				break
 			}
 			decoder[i] = json.NewDecoder(file)
 			for decoder[i].More() {
@@ -156,7 +158,6 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 				err = decoder[i].Decode(&kva)
 				if err != nil {
 					fmt.Println("decode failed, err=", err)
-					break
 				}
 				reply.BufferedData = append(reply.BufferedData, kva)
 			}
@@ -183,22 +184,22 @@ func (c *Coordinator) MapReduce(send *Send, reply *Reply) error {
 //
 func (c *Coordinator) server() {
 	//// Register publishes the receiver's methods in the DefaultServer.
-	fmt.Println("rpc.Register")
+	//fmt.Println("rpc.Register")
 	rpc.Register(c)
 
-	fmt.Println("rpc.HandleHTTP")
+	//fmt.Println("rpc.HandleHTTP")
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockName := coordinatorSock()
 	os.Remove(sockName)
 
-	fmt.Println("net.Listen")
+	//fmt.Println("net.Listen")
 	l, e := net.Listen("unix", sockName)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
 
-	fmt.Println("http.Serve")
+	//fmt.Println("http.Serve")
 	go http.Serve(l, nil)
 }
 

@@ -8,7 +8,6 @@ type any interface{}
 
 type ConcurrentMap struct {
 	sync.RWMutex
-	size  int
 	entry map[any]any
 }
 
@@ -20,23 +19,24 @@ func NewConcurrentMap() *ConcurrentMap {
 
 func (rm *ConcurrentMap) load(key any) (value any, ok bool) {
 	rm.RLock()
+	defer rm.RUnlock()
+
 	result, ok := rm.entry[key]
-	rm.RUnlock()
 	return result, ok
 }
 
 func (rm *ConcurrentMap) delete(key any) {
 	rm.Lock()
+	defer rm.Unlock()
+
 	delete(rm.entry, key)
-	rm.size--
-	rm.Unlock()
 }
 
 func (rm *ConcurrentMap) store(key any, value any) {
 	rm.Lock()
+	defer rm.Unlock()
+
 	rm.entry[key] = value
-	rm.size++
-	rm.Unlock()
 }
 
 func (rm *ConcurrentMap) Load(key any) (value any, ok bool) {
@@ -54,14 +54,17 @@ func (rm *ConcurrentMap) Store(key any, value any) {
 func (rm *ConcurrentMap) Size() int {
 	// forget add Lock...
 	rm.RLock()
-	size := rm.size
-	rm.RUnlock()
-	return size
+	defer rm.RUnlock()
+
+	return len(rm.entry)
 }
 
 func (rm *ConcurrentMap) Random() any {
+	rm.Lock()
+	defer rm.Unlock()
 	for k, _ := range rm.entry {
 		return k
 	}
+
 	return nil
 }

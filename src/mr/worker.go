@@ -83,7 +83,6 @@ func mapTask(reply *Reply, mapf func(string, string) []KeyValue) {
 
 	intermediateFileNameFile := make([]*os.File, reply.NReduce)
 	intermediateFileEncoder := make([]*json.Encoder, reply.NReduce)
-
 	// create intermediate files
 	for i := 0; i < int(reply.NReduce); i++ {
 		intermediateFileNameFile[i], _ = os.Create(intermediateFileNamePrefix + "-" + strconv.Itoa(i))
@@ -129,6 +128,7 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 	oname := "mr-out-" + strconv.Itoa(reply.RtNumber)
 	ofile, _ := os.Create(oname)
+	defer ofile.Close()
 
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-0.
@@ -149,8 +149,6 @@ func reduceTask(reply *Reply, reducef func(string, []string) string) {
 
 		i = j
 	}
-
-	ofile.Close()
 
 	reduceDone := Send{}
 	reduceDone.MessageType = ReduceCompleted
@@ -174,7 +172,7 @@ func mapReduceCall(sendMessage *Send) *Reply {
 	ok := call("Coordinator.MapReduce", &send, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
+		//fmt.Printf("reply.MessageType %v\n", reply.ReplyType)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
