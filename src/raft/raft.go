@@ -26,8 +26,7 @@ import (
 	"6.824/labrpc"
 )
 
-
-//
+// ApplyMsg
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -64,8 +63,21 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
+	currentTerm int           // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int           // candidateId that received vote in current term (or null if none)
+	log         []interface{} // log entries; each entry contains command for state machine, and term when entry was received by leader(first index is 1) ??
+
+	// Volatile state on all servers
+	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
+	lastApplied int // index of the highest log entry applied to state machine (initialized to 0, increases monotonically)
+
+	// Volatile state on leaders (Reinitialized after election)
+	nextIndex  []int // for each server, index of the next log entry to send to that server(initialized to leader last log index + 1)
+	matchIndex []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
 }
 
+// GetState
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -76,11 +88,10 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-//
+// persist
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -92,10 +103,8 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
-//
+// readPersist
 // restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -114,7 +123,6 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 }
-
 
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -136,28 +144,37 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
-//
+// RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term         int // candidate's term
+	candidateId  int // candidate requesting vote
+	lastLogIndex int // index of candidate's last log entry
+	lastLogTerm  int // term of candidate's last log entry
 }
 
-//
+// RequestVoteReply
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term        int  // currentTerm, for candidate to update itself
+	voteGranted bool // True means candidate received vote
 }
 
-//
+// RequestVote
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	// 1. Reply false if term < currentTerm
+	// 2. If votedFor is null or candidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
+
 }
 
 //
@@ -194,8 +211,37 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// AppendEntriesArgs
+// Invoked by leader to replicated log entries; also used as heartbeat
+type AppendEntriesArgs struct {
+	term         int           // leader's term
+	leaderId     int           // so follower can redirect clients
+	prevLogIndex int           // index of log entry immediately preceding new ones
+	prevLogTerm  int           // term of prevLogIndex entry
+	entries      []interface{} // log entries to store (empty for heartbeat; may send more than one for efficiency)
+	leaderCommit int           // leader's commitIndex
+}
 
-//
+// AppendEntriesReply
+// correspond to AppendEntriesArgs
+type AppendEntriesReply struct {
+	term    int  // currentTerm, for leader to update itself
+	success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
+// AppendEntries
+// AppendEntries RPC handler.
+func (rf *Raft) AppendEntries(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// Receiver implementation
+	// 1. Reply false if term < currentTerm
+	// 2. Reply false if log doesn't contain an entry at prevLogIndex whose term matches preLogTerm
+	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
+	// 4. Append any new entries not already in the log
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+
+}
+
+// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -215,7 +261,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -241,6 +286,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// ticker
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -253,7 +299,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//
+// Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -278,7 +324,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
