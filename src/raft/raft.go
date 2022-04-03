@@ -7,10 +7,10 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, Term, isleader)
 //   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
+// rf.GetState() (Term, isLeader)
+//   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
@@ -27,7 +27,7 @@ import (
 )
 
 // ApplyMsg
-// as each Raft peer becomes aware that successive log entries are
+// as each Raft peer becomes aware that successive log Entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
@@ -64,9 +64,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
-	currentTerm int           // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int           // candidateId that received vote in current term (or null if none)
-	log         []interface{} // log entries; each entry contains command for state machine, and term when entry was received by leader(first index is 1) ??
+	currentTerm int           // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int           // CandidateId that received vote in current Term (or null if none)
+	log         []interface{} // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
 
 	// Volatile state on all servers
 	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -150,10 +150,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int // candidate's term
-	candidateId  int // candidate requesting vote
-	lastLogIndex int // index of candidate's last log entry
-	lastLogTerm  int // term of candidate's last log entry
+	Term         int // candidate's Term
+	CandidateId  int // candidate requesting vote
+	LastLogIndex int // index of candidate's last log entry
+	LastLogTerm  int // Term of candidate's last log entry
 }
 
 // RequestVoteReply
@@ -162,8 +162,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int  // currentTerm, for candidate to update itself
-	voteGranted bool // True means candidate received vote
+	Term        int  // currentTerm, for candidate to update itself
+	VoteGranted bool // True means candidate received vote
 }
 
 // RequestVote
@@ -172,8 +172,8 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
-	// 1. Reply false if term < currentTerm
-	// 2. If votedFor is null or candidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
+	// 1. Reply false if Term < currentTerm
+	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
 
 }
 
@@ -212,32 +212,32 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 // AppendEntriesArgs
-// Invoked by leader to replicated log entries; also used as heartbeat
+// Invoked by leader to replicated log Entries; also used as heartbeat
 type AppendEntriesArgs struct {
-	term         int           // leader's term
-	leaderId     int           // so follower can redirect clients
-	prevLogIndex int           // index of log entry immediately preceding new ones
-	prevLogTerm  int           // term of prevLogIndex entry
-	entries      []interface{} // log entries to store (empty for heartbeat; may send more than one for efficiency)
-	leaderCommit int           // leader's commitIndex
+	Term         int           // leader's Term
+	LeaderId     int           // so follower can redirect clients
+	PrevLogIndex int           // index of log entry immediately preceding new ones
+	PrevLogTerm  int           // Term of PrevLogIndex entry
+	Entries      []interface{} // log Entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int           // leader's commitIndex
 }
 
 // AppendEntriesReply
 // correspond to AppendEntriesArgs
 type AppendEntriesReply struct {
-	term    int  // currentTerm, for leader to update itself
-	success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term    int  // currentTerm, for leader to update itself
+	Success bool // true if follower contained entry matching PrevLogIndex and PrevLogTerm
 }
 
 // AppendEntries
 // AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Receiver implementation
-	// 1. Reply false if term < currentTerm
-	// 2. Reply false if log doesn't contain an entry at prevLogIndex whose term matches preLogTerm
+	// 1. Reply false if Term < currentTerm
+	// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
-	// 4. Append any new entries not already in the log
-	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	// 4. Append any new Entries not already in the log
+	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 
 }
 
@@ -252,7 +252,7 @@ func (rf *Raft) AppendEntries(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -318,6 +318,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = []interface{}{}
+
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	rf.nextIndex = []int{}
+	rf.matchIndex = []int{}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
