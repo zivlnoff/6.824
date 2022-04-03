@@ -21,9 +21,18 @@ import (
 	//	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
+)
+
+const (
+	Leader    byte = 1
+	Follower  byte = 2
+	Candidate byte = 3
+
+	ElectionTimeout = 443 * time.Microsecond
 )
 
 // ApplyMsg
@@ -64,9 +73,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
-	currentTerm int           // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int           // CandidateId that received vote in current Term (or null if none)
-	log         []interface{} // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
+	currentTerm int        // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int        // CandidateId that received vote in current Term (or null if none)
+	log         []LogEntry // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
 
 	// Volatile state on all servers
 	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -75,6 +84,17 @@ type Raft struct {
 	// Volatile state on leaders (Reinitialized after election)
 	nextIndex  []int // for each server, index of the next log entry to send to that server(initialized to leader last log index + 1)
 	matchIndex []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
+
+	// Leader election
+	role  byte
+	alive bool
+}
+
+// LogEntry
+// todo
+type LogEntry struct {
+	Term  int
+	Entry interface{}
 }
 
 // GetState
@@ -162,8 +182,9 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int  // currentTerm, for candidate to update itself
-	VoteGranted bool // True means candidate received vote
+	Term        int       // currentTerm, for candidate to update itself
+	VoteGranted bool      // True means candidate received vote
+	ch          chan bool // Signal for synchronizing
 }
 
 // RequestVote
@@ -214,12 +235,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // AppendEntriesArgs
 // Invoked by leader to replicated log Entries; also used as heartbeat
 type AppendEntriesArgs struct {
-	Term         int           // leader's Term
-	LeaderId     int           // so follower can redirect clients
-	PrevLogIndex int           // index of log entry immediately preceding new ones
-	PrevLogTerm  int           // Term of PrevLogIndex entry
-	Entries      []interface{} // log Entries to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit int           // leader's commitIndex
+	Term         int        // leader's Term
+	LeaderId     int        // so follower can redirect clients
+	PrevLogIndex int        // index of log entry immediately preceding new ones
+	PrevLogTerm  int        // Term of PrevLogIndex entry
+	Entries      []LogEntry // log Entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int        // leader's commitIndex
 }
 
 // AppendEntriesReply
@@ -239,6 +260,11 @@ func (rf *Raft) AppendEntries(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 4. Append any new Entries not already in the log
 	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
 }
 
 // Start
@@ -265,7 +291,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -291,11 +317,69 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		if rf.alive {
+			time.Sleep(ElectionTimeout)
+		} else {
+			go rf.election()
+		}
 
+	}
+}
+
+// election
+// choose a new leader
+func (rf *Raft) election() {
+	rf.currentTerm++
+	rf.role = Candidate
+	rf.votedFor = rf.me
+
+	mu := sync.Mutex{}
+	poll := 1
+
+	requestVote := RequestVoteArgs{}
+	requestVote.Term = rf.currentTerm
+	requestVote.LastLogIndex = len(rf.log) - 1
+	requestVote.LastLogTerm = 0
+
+	replies := make([]RequestVoteReply, len(rf.peers))
+	// I can't guarantee the timeline...
+	for server, _ := range rf.peers {
+		replies[server] = RequestVoteReply{}
+		go func() {
+			rf.sendRequestVote(server, &requestVote, &replies[server])
+
+			if replies[server].VoteGranted {
+				mu.Lock()
+				poll++
+				mu.Unlock()
+			}
+
+			replies[server].ch <- true
+		}()
+	}
+
+	// wait for receiving all replies
+	for _, reply := range replies {
+		<-reply.ch
+	}
+
+	if poll > len(rf.peers)/2 {
+		rf.role = Leader
+
+		// sends heartBeat message to all the other servers to establish its authority and prevent new elections
+		appendEntriesArgs := AppendEntriesArgs{}
+		appendEntriesArgs.Term = rf.currentTerm
+		appendEntriesArgs.LeaderId = rf.me
+
+		for server, _ := range rf.peers {
+			go func() {
+				rf.sendAppendEntries(server, &appendEntriesArgs, &replies[server])
+
+			}()
+		}
 	}
 }
 
@@ -320,7 +404,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = []interface{}{}
+	rf.log = make([]interface{}, 1)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -328,6 +412,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = []int{}
 	rf.matchIndex = []int{}
 
+	rf.role = Follower
+	rf.alive = false
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
