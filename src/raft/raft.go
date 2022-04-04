@@ -108,6 +108,9 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = rf.role == Leader
+
 	return term, isleader
 }
 
