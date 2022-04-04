@@ -185,9 +185,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int       // currentTerm, for candidate to update itself
-	VoteGranted bool      // True means candidate received vote
-	ch          chan bool // Signal for synchronizing
+	Term        int  // currentTerm, for candidate to update itself
+	VoteGranted bool // True means candidate received vote
 }
 
 // RequestVote
@@ -196,9 +195,33 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
-	// 1. Reply false if Term < currentTerm
-	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
+	// Be careful:
+	// 		if one server's current term is smaller than the other's, then it updates its current term to the large
+	// value. If a candidate or leader discovers that its term is out of date, it immediately reverts to follower
+	// state. If a server receives a request with a stale term number, it rejects the request.
 
+	// 1. Reply false if Term < currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+
+	rf.muCurrentTerm.Lock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.role = Follower
+	}
+	rf.muCurrentTerm.Unlock()
+
+	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
+	// Election restriction specification:
+	// 		Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in
+	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
+	// If the logs end with the same term, then whichever log is longer is more up-to-date.
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
+		reply.VoteGranted = true
+	}
 }
 
 //
@@ -238,12 +261,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // AppendEntriesArgs
 // Invoked by leader to replicated log Entries; also used as heartbeat
 type AppendEntriesArgs struct {
-	Term         int      // leader's Term
-	LeaderId     int      // so follower can redirect clients
-	PrevLogIndex int      // index of log entry immediately preceding new ones
-	PrevLogTerm  int      // Term of PrevLogIndex entry
-	Entries      LogEntry // log Entry to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit int      // leader's commitIndex
+	Term         int        // leader's Term
+	LeaderId     int        // so follower can redirect clients
+	PrevLogIndex int        // index of log entry immediately preceding new ones
+	PrevLogTerm  int        // Term of PrevLogIndex entry
+	Entries      []LogEntry // log Entry to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int        // leader's commitIndex
 }
 
 // AppendEntriesReply
@@ -266,6 +289,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.muCurrentTerm.Lock()
 	rf.currentTerm = args.Term
+	rf.role = Follower
 	rf.alive = true
 	rf.muCurrentTerm.Unlock()
 
@@ -278,13 +302,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
-	// what means equal?
-	if len(rf.log) > args.PrevLogIndex+1 && args.Entries != rf.log[args.PrevLogIndex+1] {
-
+	// 4. Append any new Entries not already in the log
+	if len(rf.log) > args.PrevLogIndex+1 && args.Entries[0] != rf.log[args.PrevLogIndex+1] {
+		rf.log = rf.log[:len(rf.log)-1]
+		rf.log = append(rf.log, args.Entries...)
+	} else {
+		rf.log = append(rf.log, args.Entries[1:]...)
 	}
 
-	// 4. Append any new Entries not already in the log
 	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit > len(rf.log)-1 {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -374,6 +407,9 @@ func (rf *Raft) election() {
 	requestVote.LastLogTerm = 0
 
 	replies := make([]RequestVoteReply, len(rf.peers))
+	waitGroup := sync.WaitGroup{}
+	waitGroup.Add(len(rf.peers))
+
 	// I can't guarantee the timeline...
 	for server, _ := range rf.peers {
 		if rf.role != Candidate {
@@ -390,14 +426,11 @@ func (rf *Raft) election() {
 				mu.Unlock()
 			}
 
-			replies[server].ch <- true
+			waitGroup.Done()
 		}()
 	}
 
-	// wait for receiving all replies
-	for _, reply := range replies {
-		<-reply.ch
-	}
+	waitGroup.Wait()
 
 	if poll > len(rf.peers)/2 {
 		rf.role = Leader
