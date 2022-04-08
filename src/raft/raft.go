@@ -96,7 +96,7 @@ type Raft struct {
 // LogEntry
 // todo
 type LogEntry struct {
-	Term  int
+	Term  int32
 	Entry interface{}
 }
 
@@ -180,7 +180,7 @@ type RequestVoteArgs struct {
 	Term         int32 // candidate's Term
 	CandidateId  int   // candidate requesting vote
 	LastLogIndex int   // index of candidate's last log entry
-	LastLogTerm  int   // Term of candidate's last log entry
+	LastLogTerm  int32 // Term of candidate's last log entry
 }
 
 // RequestVoteReply
@@ -264,7 +264,7 @@ type AppendEntriesArgs struct {
 	Term         int32      // leader's Term
 	LeaderId     int        // so follower can redirect clients
 	PrevLogIndex int        // index of log entry immediately preceding new ones
-	PrevLogTerm  int        // Term of PrevLogIndex entry
+	PrevLogTerm  int32      // Term of PrevLogIndex entry
 	Entries      []LogEntry // log Entry to store (empty for heartbeat; may send more than one for efficiency)
 	LeaderCommit int        // leader's commitIndex
 }
@@ -293,10 +293,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm.Read()
 
-	// todo
 	// if is heartBeat return true
-	{
-
+	if args.Entries == nil {
+		reply.Success = true
+		return
 	}
 
 	// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
@@ -357,6 +357,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = int(rf.currentTerm.Read())
 
 		go func() {
+			rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
+
 			// there is no guarantee that this command will ever be
 			// committed to the Raft log, since the leader may fail
 			// or lose an election.
@@ -390,7 +392,7 @@ func (rf *Raft) killed() bool {
 
 // ticker
 // The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
+// heartbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here to check if a leader election should
@@ -454,6 +456,13 @@ func (rf *Raft) election() {
 	if poll > len(rf.peers)/2 {
 		rf.role.Write(Leader)
 
+		rf.nextIndex = make([]int, len(rf.peers))
+		for server, _ := range rf.nextIndex {
+			rf.nextIndex[server] = len(rf.log) - 1
+		}
+
+		rf.matchIndex = make([]int, len(rf.peers))
+
 		for rf.role.IsEqual(Leader) {
 			rf.heartBeat()
 		}
@@ -490,9 +499,12 @@ func (rf *Raft) heartBeat() {
 }
 
 func (rf *Raft) appendEntries() {
+	mu := sync.Mutex{}
+	shortFall := len(rf.peers)/2 + 1
+
 	for server, _ := range rf.peers {
 		go func() {
-			for true {
+			for rf.role.IsEqual(Leader) {
 				appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
 					rf.me,
 					rf.nextIndex[server] - 1,
@@ -504,12 +516,36 @@ func (rf *Raft) appendEntries() {
 				ok := rf.sendAppendEntries(server, &appendEntriesArgs, &appendEntriesReply)
 
 				if ok {
-					// todo
-					// change currentTerm dateType which is much easier to read and write
-
+					if appendEntriesReply.Success {
+						mu.Lock()
+						shortFall--
+						mu.Unlock()
+						rf.matchIndex[server] = len(rf.log) - 1
+						break
+					} else {
+						if appendEntriesReply.Term > rf.currentTerm.Read() {
+							// pass this on to heartBeat routine
+						} else {
+							// backing and forwarding log
+							rf.nextIndex[server]--
+						}
+					}
 				}
 			}
 		}()
+	}
+
+	// wait majority Follower return true or become Follower
+	for rf.role.IsEqual(Leader) {
+		if shortFall <= 0 {
+			rf.commitIndex++
+			go func() {
+				for rf.lastApplied < rf.commitIndex {
+					// apply rf.log[lastApplied.command] to the state machine
+					rf.lastApplied++
+				}
+			}()
+		}
 	}
 }
 
