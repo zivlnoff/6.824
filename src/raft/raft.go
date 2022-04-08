@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"6.824/tools"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -29,9 +30,9 @@ import (
 )
 
 const (
-	Leader    byte = 1
-	Follower  byte = 2
-	Candidate byte = 3
+	Leader    int32 = 1
+	Follower  int32 = 2
+	Candidate int32 = 3
 
 	ElectionTimeout             = 300 * time.Microsecond
 	ElectionTimeoutSwellCeiling = 150 * time.Millisecond
@@ -60,7 +61,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-//
+// Raft
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -75,10 +76,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
-	muCurrentTerm sync.RWMutex // Lock to protect shared access to this Raft's currentTerm
-	currentTerm   int          // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor      int          // CandidateId that received vote in current Term (or null if none)
-	log           []LogEntry   // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
+	currentTerm *tools.ConcurrentVar32 // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int                    // CandidateId that received vote in current Term (or null if none)
+	log         []LogEntry             // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
 
 	// Volatile state on all servers
 	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -89,8 +89,8 @@ type Raft struct {
 	matchIndex []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
 
 	// Leader election
-	role  byte // must can concurrent
-	alive bool
+	role  *tools.ConcurrentVar32
+	alive bool // should read the latest data
 }
 
 // LogEntry
@@ -108,11 +108,9 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	rf.muCurrentTerm.RUnlock()
-	term = rf.currentTerm
-	rf.muCurrentTerm.RUnlock()
+	term = int(rf.currentTerm.Read())
 
-	isleader = rf.role == Leader
+	isleader = rf.role.Read() == Leader
 
 	return term, isleader
 }
@@ -179,10 +177,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term         int // candidate's Term
-	CandidateId  int // candidate requesting vote
-	LastLogIndex int // index of candidate's last log entry
-	LastLogTerm  int // Term of candidate's last log entry
+	Term         int32 // candidate's Term
+	CandidateId  int   // candidate requesting vote
+	LastLogIndex int   // index of candidate's last log entry
+	LastLogTerm  int   // Term of candidate's last log entry
 }
 
 // RequestVoteReply
@@ -191,8 +189,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int  // currentTerm, for candidate to update itself
-	VoteGranted bool // True means candidate received vote
+	Term        int32 // currentTerm, for candidate to update itself
+	VoteGranted bool  // True means candidate received vote
 }
 
 // RequestVote
@@ -207,18 +205,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// state. If a server receives a request with a stale term number, it rejects the request.
 
 	// 1. Reply false if Term < currentTerm
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm.Read() {
+		reply.Term = rf.currentTerm.Read()
 		reply.VoteGranted = false
 		return
 	}
 
-	rf.muCurrentTerm.Lock()
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.role = Follower
-	}
-	rf.muCurrentTerm.Unlock()
+	rf.currentTerm.SmallerAndSet(args.Term)
+	rf.role.Write(Follower)
 
 	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
 	// Election restriction specification:
@@ -267,7 +261,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // AppendEntriesArgs
 // Invoked by leader to replicated log Entries; also used as heartbeat
 type AppendEntriesArgs struct {
-	Term         int        // leader's Term
+	Term         int32      // leader's Term
 	LeaderId     int        // so follower can redirect clients
 	PrevLogIndex int        // index of log entry immediately preceding new ones
 	PrevLogTerm  int        // Term of PrevLogIndex entry
@@ -278,8 +272,8 @@ type AppendEntriesArgs struct {
 // AppendEntriesReply
 // correspond to AppendEntriesArgs
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching PrevLogIndex and PrevLogTerm
+	Term    int32 // currentTerm, for leader to update itself
+	Success bool  // true if follower contained entry matching PrevLogIndex and PrevLogTerm
 }
 
 // AppendEntries
@@ -287,19 +281,17 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Receiver implementation
 	// 1. Reply false if Term < currentTerm
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm.Read() {
+		reply.Term = rf.currentTerm.Read()
 		reply.Success = false
 		return
 	}
 
-	rf.muCurrentTerm.Lock()
-	rf.currentTerm = args.Term
-	rf.role = Follower
+	rf.currentTerm.Write(args.Term)
+	rf.role.Write(Follower)
 	rf.alive = true
-	rf.muCurrentTerm.Unlock()
 
-	reply.Term = rf.currentTerm
+	reply.Term = rf.currentTerm.Read()
 
 	// todo
 	// if is heartBeat return true
@@ -357,14 +349,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-	if rf.role != Leader {
+	if !rf.role.IsEqual(Leader) {
 		isLeader = false
 	} else {
 		index = len(rf.log)
 
-		rf.muCurrentTerm.RLock()
-		term = rf.currentTerm
-		rf.muCurrentTerm.RUnlock()
+		term = int(rf.currentTerm.Read())
 
 		go func() {
 			// there is no guarantee that this command will ever be
@@ -406,7 +396,7 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		if rf.role == Leader || rf.alive {
+		if rf.role.IsEqual(Leader) || rf.alive {
 			rf.alive = false
 		} else {
 			go rf.election()
@@ -419,11 +409,9 @@ func (rf *Raft) ticker() {
 // election
 // choose a new leader
 func (rf *Raft) election() {
-	rf.muCurrentTerm.Lock()
-	rf.currentTerm++
-	rf.muCurrentTerm.Unlock()
+	rf.currentTerm.Write(rf.currentTerm.Read() + 1)
 
-	rf.role = Candidate
+	rf.role.Write(Candidate)
 
 	rf.votedFor = rf.me
 
@@ -432,7 +420,7 @@ func (rf *Raft) election() {
 	poll := 1
 
 	requestVote := RequestVoteArgs{}
-	requestVote.Term = rf.currentTerm
+	requestVote.Term = rf.currentTerm.Read()
 	requestVote.LastLogIndex = len(rf.log) - 1
 	requestVote.LastLogTerm = rf.log[requestVote.LastLogIndex].Term
 
@@ -443,7 +431,7 @@ func (rf *Raft) election() {
 	waitGroup.Add(len(rf.peers))
 
 	for server, _ := range rf.peers {
-		if rf.role != Candidate {
+		if !rf.role.IsEqual(Candidate) {
 			return
 		}
 
@@ -464,9 +452,9 @@ func (rf *Raft) election() {
 	waitGroup.Wait()
 
 	if poll > len(rf.peers)/2 {
-		rf.role = Leader
+		rf.role.Write(Leader)
 
-		for rf.role == Leader {
+		for rf.role.IsEqual(Leader) {
 			rf.heartBeat()
 		}
 	}
@@ -475,13 +463,11 @@ func (rf *Raft) election() {
 func (rf *Raft) heartBeat() {
 	// sends heartBeat message to all the other servers to establish its authority and prevent new elections
 	appendEntriesArgs := AppendEntriesArgs{}
-	rf.muCurrentTerm.RLock()
-	appendEntriesArgs.Term = rf.currentTerm
-	rf.muCurrentTerm.RUnlock()
+	appendEntriesArgs.Term = rf.currentTerm.Read()
 	appendEntriesArgs.LeaderId = rf.me
 
 	for server, _ := range rf.peers {
-		if rf.role != Leader {
+		if !rf.role.IsEqual(Leader) {
 			break
 		}
 
@@ -492,18 +478,12 @@ func (rf *Raft) heartBeat() {
 
 			// handle response
 			if ok {
-				rf.muCurrentTerm.Lock()
-				if heartBeatReply.Term > rf.currentTerm {
-					rf.currentTerm = heartBeatReply.Term
-
-					rf.role = Follower
+				beFollower := rf.currentTerm.SmallerAndSet(heartBeatReply.Term)
+				if beFollower {
+					rf.role.Write(Follower)
 					rf.alive = true
 					return
 				}
-				rf.muCurrentTerm.Unlock()
-
-				// todo logReplicate if need
-				// we really can design a code frame now
 			}
 		}()
 	}
@@ -513,15 +493,12 @@ func (rf *Raft) appendEntries() {
 	for server, _ := range rf.peers {
 		go func() {
 			for true {
-				appendEntriesArgs := AppendEntriesArgs{}
-				rf.muCurrentTerm.RLock()
-				appendEntriesArgs.Term = rf.currentTerm
-				rf.muCurrentTerm.RUnlock()
-				appendEntriesArgs.LeaderId = rf.me
-				appendEntriesArgs.PrevLogIndex = rf.nextIndex[server] - 1
-				appendEntriesArgs.PrevLogTerm = rf.log[appendEntriesArgs.PrevLogIndex].Term
-				appendEntriesArgs.Entries = rf.log[rf.nextIndex[server]:]
-				appendEntriesArgs.LeaderCommit = rf.commitIndex
+				appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
+					rf.me,
+					rf.nextIndex[server] - 1,
+					rf.log[rf.nextIndex[server]-1].Term,
+					rf.log[rf.nextIndex[server]:],
+					rf.commitIndex}
 
 				appendEntriesReply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(server, &appendEntriesArgs, &appendEntriesReply)
@@ -554,14 +531,15 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = 0
+	rf.currentTerm = new(tools.ConcurrentVar32)
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.role = Follower
+	rf.role = new(tools.ConcurrentVar32)
+	rf.role.Write(Follower)
 	rf.alive = false
 
 	// initialize from state persisted before a crash
