@@ -36,6 +36,7 @@ const (
 
 	ElectionTimeout             = 300 * time.Microsecond
 	ElectionTimeoutSwellCeiling = 150 * time.Millisecond
+	HeartBeatPeriod             = 100 * time.Millisecond
 )
 
 // ApplyMsg
@@ -211,8 +212,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	rf.currentTerm.SmallerAndSet(args.Term)
-	rf.role.Write(Follower)
+	if rf.currentTerm.SmallerAndSet(args.Term) {
+		rf.votedFor = -1
+		rf.role.Write(Follower)
+		rf.alive = true
+	}
 
 	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
 	// Election restriction specification:
@@ -220,7 +224,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
+		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		rf.role.Write(Follower)
 	}
 }
 
@@ -441,10 +447,17 @@ func (rf *Raft) election() {
 		go func() {
 			ok := rf.sendRequestVote(server, &requestVote, &replies[server])
 
-			if ok && replies[server].VoteGranted {
-				mu.Lock()
-				poll++
-				mu.Unlock()
+			if ok && rf.role.IsEqual(Candidate) {
+				if !replies[server].VoteGranted {
+					if rf.currentTerm.SmallerAndSet(replies[server].Term) {
+						rf.role.Write(Follower)
+						rf.alive = true
+					}
+				} else {
+					mu.Lock()
+					poll++
+					mu.Unlock()
+				}
 			}
 
 			waitGroup.Done()
@@ -465,6 +478,7 @@ func (rf *Raft) election() {
 
 		for rf.role.IsEqual(Leader) {
 			rf.heartBeat()
+			time.Sleep(HeartBeatPeriod)
 		}
 	}
 }
@@ -473,7 +487,6 @@ func (rf *Raft) heartBeat() {
 	// sends heartBeat message to all the other servers to establish its authority and prevent new elections
 	appendEntriesArgs := AppendEntriesArgs{}
 	appendEntriesArgs.Term = rf.currentTerm.Read()
-	appendEntriesArgs.LeaderId = rf.me
 
 	for server, _ := range rf.peers {
 		if !rf.role.IsEqual(Leader) {
@@ -491,7 +504,6 @@ func (rf *Raft) heartBeat() {
 				if beFollower {
 					rf.role.Write(Follower)
 					rf.alive = true
-					return
 				}
 			}
 		}()
@@ -520,6 +532,7 @@ func (rf *Raft) appendEntries() {
 						mu.Lock()
 						shortFall--
 						mu.Unlock()
+						rf.nextIndex[server] = len(rf.log)
 						rf.matchIndex[server] = len(rf.log) - 1
 						break
 					} else {
@@ -538,6 +551,7 @@ func (rf *Raft) appendEntries() {
 	// wait majority Follower return true or become Follower
 	for rf.role.IsEqual(Leader) {
 		if shortFall <= 0 {
+			//Should we double-check
 			rf.commitIndex++
 			go func() {
 				for rf.lastApplied < rf.commitIndex {
@@ -545,6 +559,8 @@ func (rf *Raft) appendEntries() {
 					rf.lastApplied++
 				}
 			}()
+
+			break
 		}
 	}
 }
