@@ -38,7 +38,7 @@ const (
 	//ElectionTimeout             = 300 * time.Microsecond
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
-	HeartBeatPeriod             = 100 * time.Millisecond
+	HeartBeatPeriod             = 140 * time.Millisecond
 )
 
 // ApplyMsg
