@@ -423,6 +423,7 @@ func (rf *Raft) ticker() {
 // choose a new leader
 func (rf *Raft) election() {
 	rf.currentTerm.Write(rf.currentTerm.Read() + 1)
+	fmt.Printf("election %d\n", rf.currentTerm.Read())
 
 	rf.role.Write(Candidate)
 
@@ -441,11 +442,15 @@ func (rf *Raft) election() {
 
 	// wait for receiving all replies
 	waitGroup := sync.WaitGroup{}
-	waitGroup.Add(len(rf.peers))
+	waitGroup.Add(len(rf.peers) - 1)
 
 	for server, _ := range rf.peers {
 		if !rf.role.IsEqual(Candidate) {
 			return
+		}
+
+		if server == rf.me {
+			continue
 		}
 
 		//replies[server] = RequestVoteReply{}
@@ -471,7 +476,6 @@ func (rf *Raft) election() {
 	}
 
 	waitGroup.Wait()
-
 	if poll > len(rf.peers)/2 {
 		rf.role.Write(Leader)
 		rf.nextIndex = make([]int, len(rf.peers))
@@ -498,11 +502,14 @@ func (rf *Raft) heartBeat() {
 			break
 		}
 
+		if server == rf.me {
+			continue
+		}
+
 		go func(s int) {
 			// send heart beat
 			heartBeatReply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &heartBeatReply)
-
 			// handle response
 			if ok {
 				beFollower := rf.currentTerm.SmallerAndSet(heartBeatReply.Term)
@@ -517,9 +524,13 @@ func (rf *Raft) heartBeat() {
 
 func (rf *Raft) appendEntries() {
 	mu := sync.Mutex{}
-	shortFall := len(rf.peers)/2 + 1
+	shortFall := len(rf.peers) / 2
 
 	for server, _ := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+
 		go func(s int) {
 			for rf.role.IsEqual(Leader) {
 				appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
