@@ -19,6 +19,7 @@ package raft
 
 import (
 	"6.824/tools"
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -34,8 +35,9 @@ const (
 	Follower  int32 = 2
 	Candidate int32 = 3
 
-	ElectionTimeout             = 300 * time.Microsecond
-	ElectionTimeoutSwellCeiling = 150 * time.Millisecond
+	//ElectionTimeout             = 300 * time.Microsecond
+	ElectionTimeout             = 300 * time.Millisecond
+	ElectionTimeoutSwellCeiling = 150
 	HeartBeatPeriod             = 100 * time.Millisecond
 )
 
@@ -227,6 +229,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.role.Write(Follower)
+	} else {
+		reply.VoteGranted = false
 	}
 }
 
@@ -410,7 +414,8 @@ func (rf *Raft) ticker() {
 			go rf.election()
 		}
 
-		time.Sleep(ElectionTimeout + time.Duration(rand.Int())%(ElectionTimeoutSwellCeiling+1)*time.Millisecond)
+		fmt.Println(ElectionTimeout + time.Duration(rand.Int()%(ElectionTimeoutSwellCeiling+1))*time.Millisecond)
+		time.Sleep(ElectionTimeout + time.Duration(rand.Int()%(ElectionTimeoutSwellCeiling+1))*time.Millisecond)
 	}
 }
 
@@ -443,14 +448,15 @@ func (rf *Raft) election() {
 			return
 		}
 
-		replies[server] = RequestVoteReply{}
-		go func() {
-			ok := rf.sendRequestVote(server, &requestVote, &replies[server])
+		//replies[server] = RequestVoteReply{}
+		go func(s int) {
+			ok := rf.sendRequestVote(s, &requestVote, &replies[s])
 
 			if ok && rf.role.IsEqual(Candidate) {
-				if !replies[server].VoteGranted {
-					if rf.currentTerm.SmallerAndSet(replies[server].Term) {
+				if !replies[s].VoteGranted {
+					if rf.currentTerm.SmallerAndSet(replies[s].Term) {
 						rf.role.Write(Follower)
+						rf.votedFor = -1
 						rf.alive = true
 					}
 				} else {
@@ -461,14 +467,13 @@ func (rf *Raft) election() {
 			}
 
 			waitGroup.Done()
-		}()
+		}(server)
 	}
 
 	waitGroup.Wait()
 
 	if poll > len(rf.peers)/2 {
 		rf.role.Write(Leader)
-
 		rf.nextIndex = make([]int, len(rf.peers))
 		for server, _ := range rf.nextIndex {
 			rf.nextIndex[server] = len(rf.log) - 1
@@ -493,10 +498,10 @@ func (rf *Raft) heartBeat() {
 			break
 		}
 
-		go func() {
+		go func(s int) {
 			// send heart beat
 			heartBeatReply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(server, &appendEntriesArgs, &heartBeatReply)
+			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &heartBeatReply)
 
 			// handle response
 			if ok {
@@ -506,7 +511,7 @@ func (rf *Raft) heartBeat() {
 					rf.alive = true
 				}
 			}
-		}()
+		}(server)
 	}
 }
 
@@ -515,37 +520,37 @@ func (rf *Raft) appendEntries() {
 	shortFall := len(rf.peers)/2 + 1
 
 	for server, _ := range rf.peers {
-		go func() {
+		go func(s int) {
 			for rf.role.IsEqual(Leader) {
 				appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
 					rf.me,
-					rf.nextIndex[server] - 1,
-					rf.log[rf.nextIndex[server]-1].Term,
-					rf.log[rf.nextIndex[server]:],
+					rf.nextIndex[s] - 1,
+					rf.log[rf.nextIndex[s]-1].Term,
+					rf.log[rf.nextIndex[s]:],
 					rf.commitIndex}
 
 				appendEntriesReply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(server, &appendEntriesArgs, &appendEntriesReply)
+				ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
 				if ok {
 					if appendEntriesReply.Success {
 						mu.Lock()
 						shortFall--
 						mu.Unlock()
-						rf.nextIndex[server] = len(rf.log)
-						rf.matchIndex[server] = len(rf.log) - 1
+						rf.nextIndex[s] = len(rf.log)
+						rf.matchIndex[s] = len(rf.log) - 1
 						break
 					} else {
 						if appendEntriesReply.Term > rf.currentTerm.Read() {
 							// pass this on to heartBeat routine
 						} else {
 							// backing and forwarding log
-							rf.nextIndex[server]--
+							rf.nextIndex[s]--
 						}
 					}
 				}
 			}
-		}()
+		}(server)
 	}
 
 	// wait majority Follower return true or become Follower
