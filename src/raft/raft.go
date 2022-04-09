@@ -305,8 +305,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.currentTerm.Write(args.Term)
-	rf.role.Write(Follower)
+	if rf.currentTerm.SmallerAndSet(args.Term) {
+		rf.role.Write(Follower)
+	}
 	rf.alive = true
 
 	reply.Term = rf.currentTerm.Read()
