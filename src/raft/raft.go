@@ -19,7 +19,6 @@ package raft
 
 import (
 	"6.824/tools"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -94,6 +93,9 @@ type Raft struct {
 	// Leader election
 	role  *tools.ConcurrentVar32
 	alive bool // should read the latest data
+
+	// Log Replication
+	applyCh chan ApplyMsg
 }
 
 // LogEntry
@@ -414,7 +416,6 @@ func (rf *Raft) ticker() {
 			go rf.election()
 		}
 
-		fmt.Println(ElectionTimeout + time.Duration(rand.Int()%(ElectionTimeoutSwellCeiling+1))*time.Millisecond)
 		time.Sleep(ElectionTimeout + time.Duration(rand.Int()%(ElectionTimeoutSwellCeiling+1))*time.Millisecond)
 	}
 }
@@ -423,7 +424,6 @@ func (rf *Raft) ticker() {
 // choose a new leader
 func (rf *Raft) election() {
 	rf.currentTerm.Write(rf.currentTerm.Read() + 1)
-	fmt.Printf("election %d\n", rf.currentTerm.Read())
 
 	rf.role.Write(Candidate)
 
@@ -480,7 +480,7 @@ func (rf *Raft) election() {
 		rf.role.Write(Leader)
 		rf.nextIndex = make([]int, len(rf.peers))
 		for server, _ := range rf.nextIndex {
-			rf.nextIndex[server] = len(rf.log) - 1
+			rf.nextIndex[server] = len(rf.log)
 		}
 
 		rf.matchIndex = make([]int, len(rf.peers))
@@ -566,15 +566,28 @@ func (rf *Raft) appendEntries() {
 
 	// wait majority Follower return true or become Follower
 	for rf.role.IsEqual(Leader) {
+		// Don't have these loops execute continuously without pausing, since that will
+		// slow your implementation enough that it fails tests
+		time.Sleep(10 * time.Millisecond)
+
 		if shortFall <= 0 {
 			//Should we double-check
 			rf.commitIndex++
-			go func() {
-				for rf.lastApplied < rf.commitIndex {
-					// apply rf.log[lastApplied.command] to the state machine
-					rf.lastApplied++
-				}
-			}()
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       rf.log[rf.commitIndex],
+				CommandIndex:  rf.commitIndex,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  0,
+				SnapshotIndex: 0,
+			}
+			//go func() {
+			//	for rf.lastApplied < rf.commitIndex {
+			////		apply rf.log[lastApplied.command] to the state machine
+			//		rf.lastApplied++
+			//	}
+			//}()
 
 			break
 		}
@@ -610,6 +623,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.role.Write(Follower)
 	rf.alive = false
 
+	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
