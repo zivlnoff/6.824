@@ -33,6 +33,18 @@ func (rvInt32 *ConcurrentVarInt32) SmallerAndSet(v int32) bool {
 	return false
 }
 
+func (rvInt32 *ConcurrentVarInt32) BiggerAndSet(v int32) bool {
+	rvInt32.Lock()
+	defer rvInt32.Unlock()
+
+	if rvInt32.val > v {
+		rvInt32.val = v
+		return true
+	}
+
+	return false
+}
+
 func (rvInt32 *ConcurrentVarInt32) IsEqual(v int32) bool {
 	rvInt32.Lock()
 	defer rvInt32.Unlock()
@@ -42,6 +54,10 @@ func (rvInt32 *ConcurrentVarInt32) IsEqual(v int32) bool {
 	}
 
 	return false
+}
+
+func (rvInt32 *ConcurrentVarInt32) AddOne() {
+	atomic.AddInt32(&rvInt32.val, 1)
 }
 
 type ConcurrentVarInt struct {

@@ -222,8 +222,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.currentTerm.SmallerAndSet(args.Term) {
-		rf.votedFor = -1
 		rf.role.Write(Follower)
+		atomic.StoreInt32(&rf.votedFor, -1)
 		rf.alive = true
 	}
 
@@ -305,10 +305,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	rf.alive = true
 	if rf.currentTerm.SmallerAndSet(args.Term) {
 		rf.role.Write(Follower)
+		atomic.StoreInt32(&rf.votedFor, -1)
 	}
-	rf.alive = true
 
 	reply.Term = rf.currentTerm.Read()
 
@@ -321,17 +322,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 	// 4. Append any new Entries not already in the log
 	reply.Success = true
-
-	if args.Entries != nil {
-		if len(rf.log) > args.PrevLogIndex+1 && args.Entries[0] != rf.log[args.PrevLogIndex+1] {
-			rf.log = rf.log[:len(rf.log)-1]
-			rf.log = append(rf.log, args.Entries...)
-		} else if len(rf.log) == args.PrevLogIndex+1 {
-			rf.log = append(rf.log, args.Entries[:]...)
-		} else {
-			rf.log = append(rf.log, args.Entries[1:]...)
-		}
-	}
+	rf.log = rf.log[:args.PrevLogIndex+1]
+	rf.log = append(rf.log, args.Entries[:]...)
 
 	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
@@ -442,7 +434,7 @@ func (rf *Raft) ticker() {
 // election
 // choose a new leader
 func (rf *Raft) election() {
-	rf.currentTerm.Write(rf.currentTerm.Read() + 1)
+	rf.currentTerm.AddOne()
 
 	rf.role.Write(Candidate)
 
@@ -479,7 +471,7 @@ func (rf *Raft) election() {
 				if !replies[s].VoteGranted {
 					if rf.currentTerm.SmallerAndSet(replies[s].Term) {
 						rf.role.Write(Follower)
-						rf.votedFor = -1
+						atomic.StoreInt32(&rf.votedFor, -1)
 						rf.alive = true
 					}
 				} else {
@@ -512,29 +504,37 @@ func (rf *Raft) election() {
 
 func (rf *Raft) heartBeat() {
 	// sends heartBeat message to all the other servers to establish its authority and prevent new elections
-	appendEntriesArgs := AppendEntriesArgs{}
-	appendEntriesArgs.Term = rf.currentTerm.Read()
-	appendEntriesArgs.LeaderCommit = rf.commitIndex
-
 	for server, _ := range rf.peers {
-		if !rf.role.IsEqual(Leader) {
-			break
-		}
-
 		if server == int(rf.me) {
 			continue
 		}
 
 		go func(s int) {
-			// send heart beat
-			heartBeatReply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &heartBeatReply)
-			// handle response
+			appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
+				rf.me,
+				rf.nextIndex[s] - 1,
+				rf.log[rf.nextIndex[s]-1].Term,
+				rf.log[rf.nextIndex[s]:],
+				rf.commitIndex}
+
+			appendEntriesReply := AppendEntriesReply{}
+			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
+
 			if ok {
-				beFollower := rf.currentTerm.SmallerAndSet(heartBeatReply.Term)
-				if beFollower {
-					rf.role.Write(Follower)
-					rf.alive = true
+				if appendEntriesReply.Success {
+					rf.nextIndex[s] = len(rf.log)
+					rf.matchIndex[s] = len(rf.log) - 1
+				} else {
+					if rf.currentTerm.SmallerAndSet(appendEntriesReply.Term) {
+						atomic.StoreInt32(&rf.votedFor, -1)
+						rf.role.Write(Follower)
+						rf.alive = true
+					} else if rf.role.IsEqual(Leader) {
+						// backing and forwarding log
+						if rf.nextIndex[s] > 1 {
+							rf.nextIndex[s]--
+						}
+					}
 				}
 			}
 		}(server)
@@ -542,7 +542,7 @@ func (rf *Raft) heartBeat() {
 }
 
 func (rf *Raft) appendEntriesWorker() {
-	for atomic.LoadInt32(&rf.dead) != 1 {
+	for true {
 		rf.workerCond.L.Lock()
 
 		for !rf.goAhead {
@@ -585,9 +585,11 @@ func (rf *Raft) appendEntries() {
 						rf.matchIndex[s] = len(rf.log) - 1
 						break
 					} else {
-						if appendEntriesReply.Term > rf.currentTerm.Read() {
-							// pass this on to heartBeat routine
-						} else {
+						if rf.currentTerm.SmallerAndSet(appendEntriesReply.Term) {
+							atomic.StoreInt32(&rf.votedFor, -1)
+							rf.role.Write(Follower)
+							rf.alive = true
+						} else if rf.role.IsEqual(Leader) {
 							// backing and forwarding log
 							rf.nextIndex[s]--
 						}
