@@ -19,7 +19,6 @@ package raft
 
 import (
 	"6.824/tools"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -98,6 +97,10 @@ type Raft struct {
 
 	// Log Replication
 	applyCh chan ApplyMsg
+
+	// appendEntriesWorker
+	goAhead    bool
+	workerCond *sync.Cond
 }
 
 // LogEntry
@@ -386,6 +389,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// committed to the Raft log, since the leader may fail
 		// or lose an election.
 		rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
+
+		rf.workerCond.L.Lock()
+		rf.goAhead = true
+		rf.workerCond.Signal()
 	}
 
 	return index, term, isLeader
@@ -486,9 +493,6 @@ func (rf *Raft) election() {
 
 	waitGroup.Wait()
 	if poll > len(rf.peers)/2 {
-		if ColvTZziDebug {
-			fmt.Printf("Raft: %v Term: %v win a Leader Election\n", rf.me, rf.currentTerm.Read())
-		}
 		rf.role.Write(Leader)
 		rf.nextIndex = make([]int, len(rf.peers))
 		for server, _ := range rf.nextIndex {
@@ -537,10 +541,13 @@ func (rf *Raft) heartBeat() {
 
 func (rf *Raft) appendEntriesWorker() {
 	for atomic.LoadInt32(&rf.dead) != 1 {
-		if rf.role.IsEqual(Leader) && len(rf.log) > rf.commitIndex+1 {
-			rf.appendEntries()
+		rf.workerCond.L.Lock()
+
+		for !rf.goAhead {
+			rf.workerCond.Wait()
 		}
-		time.Sleep(40 * time.Millisecond)
+
+		rf.appendEntries()
 	}
 }
 
@@ -642,6 +649,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.alive = false
 
 	rf.applyCh = applyCh
+
+	rf.workerCond = sync.NewCond(new(sync.Mutex))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
