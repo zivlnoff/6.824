@@ -231,9 +231,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 
 	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
-		//if ColvTZziDebug {
-		//	fmt.Printf("Raft: %v Term: %v vote for Candidate: %v\n", rf.me, rf.currentTerm.Read(), args.CandidateId)
-		//}
 		rf.role.Write(Follower)
 		rf.alive = true
 		reply.VoteGranted = true
@@ -351,15 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
-			//if ColvTZziDebug {
-			//	fmt.Printf("Raft: %v Role: %v Term: %v commitIndex %v lastApplied: %v\n", rf.me,
-			//		rf.role.Read(), rf.currentTerm.Read(), rf.commitIndex, rf.lastApplied)
-			//}
 		}
-	}
-
-	if args.Entries != nil && ColvTZziDebug {
-		fmt.Printf("Passive-------- Raft: %v Log: %v commitIndex: %v lastApplied: %v\n", rf.me, rf.log, rf.commitIndex, rf.lastApplied)
 	}
 }
 
@@ -393,19 +382,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		term = int(rf.currentTerm.Read())
 
-		go func() {
-			rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
-
-			// there is no guarantee that this command will ever be
-			// committed to the Raft log, since the leader may fail
-			// or lose an election.
-
-			//if ColvTZziDebug {
-			//	fmt.Printf("Raft: %v append Entry{index: %v, Term: %v, Command: %v}\n", rf.me, len(rf.log)-1, rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Command)
-			//}
-
-			//rf.appendEntries()
-		}()
+		// there is no guarantee that this command will ever be
+		// committed to the Raft log, since the leader may fail
+		// or lose an election.
+		rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
 	}
 
 	return index, term, isLeader
@@ -443,9 +423,6 @@ func (rf *Raft) ticker() {
 		if rf.role.IsEqual(Leader) || rf.alive {
 			rf.alive = false
 		} else {
-			//if ColvTZziDebug {
-			//	fmt.Printf("Raft: %v\tRole: %v\tTerm: %v start election\n", rf.me, rf.role.Read(), rf.currentTerm.Read())
-			//}
 			go rf.election()
 		}
 
@@ -497,9 +474,6 @@ func (rf *Raft) election() {
 						rf.alive = true
 					}
 				} else {
-					//if ColvTZziDebug {
-					//	fmt.Printf("Raft: %v received vote from CandidateId: %v\n", rf.me, s)
-					//}
 					mu.Lock()
 					poll++
 					mu.Unlock()
@@ -524,9 +498,6 @@ func (rf *Raft) election() {
 		rf.matchIndex = make([]int, len(rf.peers))
 
 		for rf.role.IsEqual(Leader) {
-			//if ColvTZziDebug {
-			//	fmt.Printf("Raft: %v send HeartBeat\n", rf.me)
-			//}
 			rf.heartBeat()
 			time.Sleep(HeartBeatPeriod)
 		}
@@ -596,10 +567,6 @@ func (rf *Raft) appendEntries() {
 
 				if ok {
 					if appendEntriesReply.Success {
-						//if ColvTZziDebug {
-						//	fmt.Printf("Raft: %v receive Server: %v success appendEntries Reply\n", rf.me, s)
-						//}
-
 						mu.Lock()
 						shortFall--
 						mu.Unlock()
@@ -639,12 +606,6 @@ func (rf *Raft) appendEntries() {
 					SnapshotTerm:  0,
 					SnapshotIndex: 0,
 				}
-				//if ColvTZziDebug {
-				//	fmt.Printf("Raft: %v commit and apply Entry: %v\n", rf.me, rf.log[rf.lastApplied])
-				//}
-			}
-			if ColvTZziDebug {
-				fmt.Printf("Positive-------- Raft: %v Log: %v commitIndex: %v lastApplied: %v\n", rf.me, rf.log, rf.commitIndex, rf.lastApplied)
 			}
 			break
 		}
