@@ -19,6 +19,7 @@ package raft
 
 import (
 	"6.824/tools"
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -34,10 +35,11 @@ const (
 	Follower  int32 = 2
 	Candidate int32 = 3
 
-	//ElectionTimeout             = 300 * time.Microsecond
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
 	HeartBeatPeriod             = 140 * time.Millisecond
+
+	ColvTZziDebug = true
 )
 
 // ApplyMsg
@@ -228,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
+		//todo Maybug
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.role.Write(Follower)
@@ -374,6 +377,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			// there is no guarantee that this command will ever be
 			// committed to the Raft log, since the leader may fail
 			// or lose an election.
+			if ColvTZziDebug {
+				fmt.Printf("Raft: %v append Entry{index: %v, Term: %v, Command: %v}\n", rf.me, len(rf.log)-1, rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Entry)
+			}
+
 			rf.appendEntries()
 		}()
 	}
@@ -413,6 +420,9 @@ func (rf *Raft) ticker() {
 		if rf.role.IsEqual(Leader) || rf.alive {
 			rf.alive = false
 		} else {
+			if ColvTZziDebug {
+				fmt.Printf("Raft: %v\tRole: %v\tTerm: %v start election\n", rf.me, rf.role.Read(), rf.currentTerm.Read())
+			}
 			go rf.election()
 		}
 
@@ -429,7 +439,6 @@ func (rf *Raft) election() {
 
 	rf.votedFor = rf.me
 
-	// synchronize "poll++"
 	mu := sync.Mutex{}
 	poll := 1
 
@@ -453,7 +462,6 @@ func (rf *Raft) election() {
 			continue
 		}
 
-		//replies[server] = RequestVoteReply{}
 		go func(s int) {
 			ok := rf.sendRequestVote(s, &requestVote, &replies[s])
 
@@ -465,6 +473,9 @@ func (rf *Raft) election() {
 						rf.alive = true
 					}
 				} else {
+					if ColvTZziDebug {
+						fmt.Printf("Raft: %v received vote from CandidateId: %v\n", rf.me, s)
+					}
 					mu.Lock()
 					poll++
 					mu.Unlock()
@@ -477,6 +488,9 @@ func (rf *Raft) election() {
 
 	waitGroup.Wait()
 	if poll > len(rf.peers)/2 {
+		if ColvTZziDebug {
+			fmt.Printf("Raft: %v Term: %v win a Leader Election\n", rf.me, rf.currentTerm.Read())
+		}
 		rf.role.Write(Leader)
 		rf.nextIndex = make([]int, len(rf.peers))
 		for server, _ := range rf.nextIndex {
@@ -486,6 +500,9 @@ func (rf *Raft) election() {
 		rf.matchIndex = make([]int, len(rf.peers))
 
 		for rf.role.IsEqual(Leader) {
+			if ColvTZziDebug {
+				fmt.Printf("Raft: %v send HeartBeat\n", rf.me)
+			}
 			rf.heartBeat()
 			time.Sleep(HeartBeatPeriod)
 		}
@@ -545,6 +562,10 @@ func (rf *Raft) appendEntries() {
 
 				if ok {
 					if appendEntriesReply.Success {
+						if ColvTZziDebug {
+							fmt.Printf("Raft: %v receive Server: %v success appendEntries Reply\n", rf.me, s)
+						}
+
 						mu.Lock()
 						shortFall--
 						mu.Unlock()
@@ -581,6 +602,10 @@ func (rf *Raft) appendEntries() {
 				Snapshot:      nil,
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
+			}
+
+			if ColvTZziDebug {
+				fmt.Printf("Raft: %v commit and apply Entry: %v\n", rf.me, rf.commitIndex)
 			}
 			//go func() {
 			//	for rf.lastApplied < rf.commitIndex {
