@@ -72,7 +72,7 @@ type Raft struct {
 	muPeers   sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	me        int32               // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
@@ -80,9 +80,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
-	currentTerm *tools.ConcurrentVar32 // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int                    // CandidateId that received vote in current Term (or null if none)
-	log         []LogEntry             // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
+	currentTerm *tools.ConcurrentVarInt32 // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int32                     // CandidateId that received vote in current Term (or null if none)
+	log         []LogEntry                // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
 
 	// Volatile state on all servers
 	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -93,7 +93,7 @@ type Raft struct {
 	matchIndex []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
 
 	// Leader election
-	role  *tools.ConcurrentVar32
+	role  *tools.ConcurrentVarInt32
 	alive bool // should read the latest data
 
 	// Log Replication
@@ -103,8 +103,8 @@ type Raft struct {
 // LogEntry
 // todo
 type LogEntry struct {
-	Term  int32
-	Entry interface{}
+	Term    int32
+	Command interface{}
 }
 
 // GetState
@@ -185,7 +185,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int32 // candidate's Term
-	CandidateId  int   // candidate requesting vote
+	CandidateId  int32 // candidate requesting vote
 	LastLogIndex int   // index of candidate's last log entry
 	LastLogTerm  int32 // Term of candidate's last log entry
 }
@@ -229,11 +229,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 		Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
-		//todo Maybug
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
+
+	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+		//if ColvTZziDebug {
+		//	fmt.Printf("Raft: %v Term: %v vote for Candidate: %v\n", rf.me, rf.currentTerm.Read(), args.CandidateId)
+		//}
 		rf.role.Write(Follower)
+		rf.alive = true
+		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
 	}
@@ -277,10 +280,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Invoked by leader to replicated log Entries; also used as heartbeat
 type AppendEntriesArgs struct {
 	Term         int32      // leader's Term
-	LeaderId     int        // so follower can redirect clients
+	LeaderId     int32      // so follower can redirect clients
 	PrevLogIndex int        // index of log entry immediately preceding new ones
 	PrevLogTerm  int32      // Term of PrevLogIndex entry
-	Entries      []LogEntry // log Entry to store (empty for heartbeat; may send more than one for efficiency)
+	Entries      []LogEntry // log Command to store (empty for heartbeat; may send more than one for efficiency)
 	LeaderCommit int        // leader's commitIndex
 }
 
@@ -308,12 +311,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm.Read()
 
-	// if is heartBeat return true
-	if args.Entries == nil {
-		reply.Success = true
-		return
-	}
-
 	// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
 	if args.PrevLogIndex >= len(rf.log) || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
 		reply.Success = false
@@ -324,11 +321,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 4. Append any new Entries not already in the log
 	reply.Success = true
 
-	if len(rf.log) > args.PrevLogIndex+1 && args.Entries[0] != rf.log[args.PrevLogIndex+1] {
-		rf.log = rf.log[:len(rf.log)-1]
-		rf.log = append(rf.log, args.Entries...)
-	} else {
-		rf.log = append(rf.log, args.Entries[1:]...)
+	if args.Entries != nil {
+		if len(rf.log) > args.PrevLogIndex+1 && args.Entries[0] != rf.log[args.PrevLogIndex+1] {
+			rf.log = rf.log[:len(rf.log)-1]
+			rf.log = append(rf.log, args.Entries...)
+		} else if len(rf.log) == args.PrevLogIndex+1 {
+			rf.log = append(rf.log, args.Entries[:]...)
+		} else {
+			rf.log = append(rf.log, args.Entries[1:]...)
+		}
 	}
 
 	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
@@ -338,6 +339,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
+
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       rf.log[rf.lastApplied].Command,
+				CommandIndex:  rf.lastApplied,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  0,
+				SnapshotIndex: 0,
+			}
+			//if ColvTZziDebug {
+			//	fmt.Printf("Raft: %v Role: %v Term: %v commitIndex %v lastApplied: %v\n", rf.me,
+			//		rf.role.Read(), rf.currentTerm.Read(), rf.commitIndex, rf.lastApplied)
+			//}
+		}
+	}
+
+	if args.Entries != nil && ColvTZziDebug {
+		fmt.Printf("Passive-------- Raft: %v Log: %v commitIndex: %v lastApplied: %v\n", rf.me, rf.log, rf.commitIndex, rf.lastApplied)
 	}
 }
 
@@ -377,11 +399,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			// there is no guarantee that this command will ever be
 			// committed to the Raft log, since the leader may fail
 			// or lose an election.
-			if ColvTZziDebug {
-				fmt.Printf("Raft: %v append Entry{index: %v, Term: %v, Command: %v}\n", rf.me, len(rf.log)-1, rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Entry)
-			}
 
-			rf.appendEntries()
+			//if ColvTZziDebug {
+			//	fmt.Printf("Raft: %v append Entry{index: %v, Term: %v, Command: %v}\n", rf.me, len(rf.log)-1, rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Command)
+			//}
+
+			//rf.appendEntries()
 		}()
 	}
 
@@ -420,9 +443,9 @@ func (rf *Raft) ticker() {
 		if rf.role.IsEqual(Leader) || rf.alive {
 			rf.alive = false
 		} else {
-			if ColvTZziDebug {
-				fmt.Printf("Raft: %v\tRole: %v\tTerm: %v start election\n", rf.me, rf.role.Read(), rf.currentTerm.Read())
-			}
+			//if ColvTZziDebug {
+			//	fmt.Printf("Raft: %v\tRole: %v\tTerm: %v start election\n", rf.me, rf.role.Read(), rf.currentTerm.Read())
+			//}
 			go rf.election()
 		}
 
@@ -444,6 +467,7 @@ func (rf *Raft) election() {
 
 	requestVote := RequestVoteArgs{}
 	requestVote.Term = rf.currentTerm.Read()
+	requestVote.CandidateId = rf.me
 	requestVote.LastLogIndex = len(rf.log) - 1
 	requestVote.LastLogTerm = rf.log[requestVote.LastLogIndex].Term
 
@@ -458,7 +482,7 @@ func (rf *Raft) election() {
 			return
 		}
 
-		if server == rf.me {
+		if server == int(rf.me) {
 			continue
 		}
 
@@ -473,9 +497,9 @@ func (rf *Raft) election() {
 						rf.alive = true
 					}
 				} else {
-					if ColvTZziDebug {
-						fmt.Printf("Raft: %v received vote from CandidateId: %v\n", rf.me, s)
-					}
+					//if ColvTZziDebug {
+					//	fmt.Printf("Raft: %v received vote from CandidateId: %v\n", rf.me, s)
+					//}
 					mu.Lock()
 					poll++
 					mu.Unlock()
@@ -500,9 +524,9 @@ func (rf *Raft) election() {
 		rf.matchIndex = make([]int, len(rf.peers))
 
 		for rf.role.IsEqual(Leader) {
-			if ColvTZziDebug {
-				fmt.Printf("Raft: %v send HeartBeat\n", rf.me)
-			}
+			//if ColvTZziDebug {
+			//	fmt.Printf("Raft: %v send HeartBeat\n", rf.me)
+			//}
 			rf.heartBeat()
 			time.Sleep(HeartBeatPeriod)
 		}
@@ -513,13 +537,14 @@ func (rf *Raft) heartBeat() {
 	// sends heartBeat message to all the other servers to establish its authority and prevent new elections
 	appendEntriesArgs := AppendEntriesArgs{}
 	appendEntriesArgs.Term = rf.currentTerm.Read()
+	appendEntriesArgs.LeaderCommit = rf.commitIndex
 
 	for server, _ := range rf.peers {
 		if !rf.role.IsEqual(Leader) {
 			break
 		}
 
-		if server == rf.me {
+		if server == int(rf.me) {
 			continue
 		}
 
@@ -539,12 +564,21 @@ func (rf *Raft) heartBeat() {
 	}
 }
 
+func (rf *Raft) appendEntriesWorker() {
+	for atomic.LoadInt32(&rf.dead) != 1 {
+		if rf.role.IsEqual(Leader) && len(rf.log) > rf.commitIndex+1 {
+			rf.appendEntries()
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
 func (rf *Raft) appendEntries() {
 	mu := sync.Mutex{}
 	shortFall := len(rf.peers) / 2
 
 	for server, _ := range rf.peers {
-		if server == rf.me {
+		if server == int(rf.me) {
 			continue
 		}
 
@@ -562,9 +596,9 @@ func (rf *Raft) appendEntries() {
 
 				if ok {
 					if appendEntriesReply.Success {
-						if ColvTZziDebug {
-							fmt.Printf("Raft: %v receive Server: %v success appendEntries Reply\n", rf.me, s)
-						}
+						//if ColvTZziDebug {
+						//	fmt.Printf("Raft: %v receive Server: %v success appendEntries Reply\n", rf.me, s)
+						//}
 
 						mu.Lock()
 						shortFall--
@@ -593,27 +627,25 @@ func (rf *Raft) appendEntries() {
 
 		if shortFall <= 0 {
 			//Should we double-check
-			rf.commitIndex++
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       rf.log[rf.commitIndex],
-				CommandIndex:  rf.commitIndex,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  0,
-				SnapshotIndex: 0,
+			rf.commitIndex = len(rf.log) - 1
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied++
+				rf.applyCh <- ApplyMsg{
+					CommandValid:  true,
+					Command:       rf.log[rf.lastApplied].Command,
+					CommandIndex:  rf.lastApplied,
+					SnapshotValid: false,
+					Snapshot:      nil,
+					SnapshotTerm:  0,
+					SnapshotIndex: 0,
+				}
+				//if ColvTZziDebug {
+				//	fmt.Printf("Raft: %v commit and apply Entry: %v\n", rf.me, rf.log[rf.lastApplied])
+				//}
 			}
-
 			if ColvTZziDebug {
-				fmt.Printf("Raft: %v commit and apply Entry: %v\n", rf.me, rf.commitIndex)
+				fmt.Printf("Positive-------- Raft: %v Log: %v commitIndex: %v lastApplied: %v\n", rf.me, rf.log, rf.commitIndex, rf.lastApplied)
 			}
-			//go func() {
-			//	for rf.lastApplied < rf.commitIndex {
-			////		apply rf.log[lastApplied.command] to the state machine
-			//		rf.lastApplied++
-			//	}
-			//}()
-
 			break
 		}
 	}
@@ -634,17 +666,17 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
-	rf.me = me
+	rf.me = int32(me)
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = new(tools.ConcurrentVar32)
+	rf.currentTerm = new(tools.ConcurrentVarInt32)
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.role = new(tools.ConcurrentVar32)
+	rf.role = new(tools.ConcurrentVarInt32)
 	rf.role.Write(Follower)
 	rf.alive = false
 
@@ -654,6 +686,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// worker queue for AppendEntries
+	go rf.appendEntriesWorker()
 
 	return rf
 }

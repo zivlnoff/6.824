@@ -5,41 +5,54 @@ import (
 	"sync/atomic"
 )
 
-type ConcurrentVar32 struct {
+type ConcurrentVarInt32 struct {
 	sync.Mutex
 	val int32
 }
 
-func (rv *ConcurrentVar32) Read() int32 {
-	return atomic.LoadInt32(&rv.val)
+func (rvInt32 *ConcurrentVarInt32) Read() int32 {
+	return atomic.LoadInt32(&rvInt32.val)
 }
 
-func (rv *ConcurrentVar32) Write(v int32) {
-	rv.Lock()
-	defer rv.Unlock()
+func (rvInt32 *ConcurrentVarInt32) Write(v int32) {
+	rvInt32.Lock()
+	defer rvInt32.Unlock()
 
-	rv.val = v
+	rvInt32.val = v
 }
 
-func (rv *ConcurrentVar32) SmallerAndSet(v int32) bool {
-	rv.Lock()
-	defer rv.Unlock()
+func (rvInt32 *ConcurrentVarInt32) SmallerAndSet(v int32) bool {
+	rvInt32.Lock()
+	defer rvInt32.Unlock()
 
-	if rv.val < v {
-		rv.val = v
+	if rvInt32.val < v {
+		rvInt32.val = v
 		return true
 	}
 
 	return false
 }
 
-func (rv *ConcurrentVar32) IsEqual(v int32) bool {
-	rv.Lock()
-	defer rv.Unlock()
+func (rvInt32 *ConcurrentVarInt32) IsEqual(v int32) bool {
+	rvInt32.Lock()
+	defer rvInt32.Unlock()
 
-	if rv.val == v {
+	if rvInt32.val == v {
 		return true
 	}
 
 	return false
+}
+
+type ConcurrentVarInt struct {
+	sync.Mutex
+	Val int
+}
+
+func (rvInt *ConcurrentVarInt) Lock() {
+	rvInt.Lock()
+}
+
+func (rvInt *ConcurrentVarInt) UnLock() {
+	rvInt.Unlock()
 }
