@@ -392,6 +392,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		rf.workerCond.L.Lock()
 		rf.goAhead = true
+		rf.workerCond.L.Unlock()
 		rf.workerCond.Signal()
 	}
 
@@ -547,6 +548,8 @@ func (rf *Raft) appendEntriesWorker() {
 			rf.workerCond.Wait()
 		}
 
+		rf.workerCond.L.Unlock()
+		rf.goAhead = false
 		rf.appendEntries()
 	}
 }
