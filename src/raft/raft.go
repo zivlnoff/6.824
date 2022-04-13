@@ -41,6 +41,25 @@ const (
 	ColvTZziDebug = true
 )
 
+const (
+	dClient  tools.LogTopic = "CLNT"
+	dCommit  tools.LogTopic = "CMIT"
+	dDrop    tools.LogTopic = "DROP"
+	dError   tools.LogTopic = "ERRO"
+	dInfo    tools.LogTopic = "INFO"
+	dLeader  tools.LogTopic = "LEAD"
+	dLog     tools.LogTopic = "LOG1"
+	dLog2    tools.LogTopic = "LOG2"
+	dPersist tools.LogTopic = "PERS"
+	dSnap    tools.LogTopic = "SNAP"
+	dTerm    tools.LogTopic = "TERM"
+	dTest    tools.LogTopic = "TEST"
+	dTImer   tools.LogTopic = "TIMR"
+	dTrace   tools.LogTopic = "TRCE"
+	dVote    tools.LogTopic = "VOTE"
+	dWarn    tools.LogTopic = "WARN"
+)
+
 // ApplyMsg
 // as each Raft peer becomes aware that successive log Entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -234,8 +253,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 
 	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 		rf.role.Write(Follower)
 		rf.alive = true
+		reply.Term = rf.currentTerm.Read()
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
@@ -435,19 +456,18 @@ func (rf *Raft) ticker() {
 // choose a new leader
 func (rf *Raft) election() {
 	rf.currentTerm.AddOne()
-
 	rf.role.Write(Candidate)
-
 	rf.votedFor = rf.me
 
 	mu := sync.Mutex{}
 	poll := 1
 
-	requestVote := RequestVoteArgs{}
-	requestVote.Term = rf.currentTerm.Read()
-	requestVote.CandidateId = rf.me
-	requestVote.LastLogIndex = len(rf.log) - 1
-	requestVote.LastLogTerm = rf.log[requestVote.LastLogIndex].Term
+	requestVote := RequestVoteArgs{
+		Term:         rf.currentTerm.Read(),
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.log) - 1,
+		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+	}
 
 	replies := make([]RequestVoteReply, len(rf.peers))
 
@@ -474,7 +494,8 @@ func (rf *Raft) election() {
 						atomic.StoreInt32(&rf.votedFor, -1)
 						rf.alive = true
 					}
-				} else {
+				} else if replies[s].Term == rf.currentTerm.Read() {
+					tools.Debug(dVote, "S%v <- S%v Got vote\n", rf.me, s)
 					mu.Lock()
 					poll++
 					mu.Unlock()
@@ -487,6 +508,8 @@ func (rf *Raft) election() {
 
 	waitGroup.Wait()
 	if poll > len(rf.peers)/2 {
+		tools.Debug(dLeader, "S%v Achieved Majority for T%v (%v), converting to Leader\n", rf.me, rf.currentTerm.Read(), poll)
+
 		rf.role.Write(Leader)
 		rf.nextIndex = make([]int, len(rf.peers))
 		for server, _ := range rf.nextIndex {
@@ -496,6 +519,7 @@ func (rf *Raft) election() {
 		rf.matchIndex = make([]int, len(rf.peers))
 
 		for rf.role.IsEqual(Leader) {
+			tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
 			rf.heartBeat()
 			time.Sleep(HeartBeatPeriod)
 		}
@@ -608,6 +632,7 @@ func (rf *Raft) appendEntries() {
 		if shortFall <= 0 {
 			//Should we double-check
 			rf.commitIndex = len(rf.log) - 1
+			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v\n", rf.me, rf.commitIndex)
 			for rf.lastApplied < rf.commitIndex {
 				rf.lastApplied++
 				rf.applyCh <- ApplyMsg{
