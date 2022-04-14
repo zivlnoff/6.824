@@ -35,7 +35,7 @@ const (
 	Candidate int32 = 3
 
 	ElectionTimeout             = 300 * time.Millisecond
-	ElectionTimeoutSwellCeiling = 150
+	ElectionTimeoutSwellCeiling = 200
 	HeartBeatPeriod             = 140 * time.Millisecond
 
 	ColvTZziDebug = true
@@ -240,10 +240,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if rf.currentTerm.SmallerAndSet(args.Term) {
-		rf.role.Write(Follower)
-		atomic.StoreInt32(&rf.votedFor, -1)
-		rf.alive = true
+	if oldTerm, ok := rf.currentTerm.SmallerAndSet(args.Term); ok {
+		rf.toFollowerByTermUpgrade(oldTerm)
 	}
 
 	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
@@ -326,10 +324,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.alive = true
-	if rf.currentTerm.SmallerAndSet(args.Term) {
+	if oldTerm, ok := rf.currentTerm.SmallerAndSet(args.Term); ok {
+		rf.toFollowerByTermUpgrade(oldTerm)
+	} else {
+		rf.alive = true
 		rf.role.Write(Follower)
-		atomic.StoreInt32(&rf.votedFor, -1)
 	}
 
 	reply.Term = rf.currentTerm.Read()
@@ -486,10 +485,8 @@ func (rf *Raft) election(kill chan bool) {
 
 			if ok {
 				if !replies[s].VoteGranted {
-					if rf.currentTerm.SmallerAndSet(replies[s].Term) {
-						rf.role.Write(Follower)
-						atomic.StoreInt32(&rf.votedFor, -1)
-						rf.alive = true
+					if oldTerm, ok := rf.currentTerm.SmallerAndSet(replies[s].Term); ok {
+						rf.toFollowerByTermUpgrade(oldTerm)
 					}
 				} else {
 					tools.Debug(dVote, "S%v <- S%v Got vote(T%v)\n", rf.me, s, replies[s].Term)
@@ -552,10 +549,8 @@ func (rf *Raft) heartBeat() {
 					rf.nextIndex[s] = len(rf.log)
 					rf.matchIndex[s] = len(rf.log) - 1
 				} else {
-					if rf.currentTerm.SmallerAndSet(appendEntriesReply.Term) {
-						atomic.StoreInt32(&rf.votedFor, -1)
-						rf.role.Write(Follower)
-						rf.alive = true
+					if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok {
+						rf.toFollowerByTermUpgrade(oldTerm)
 					} else if rf.role.IsEqual(Leader) {
 						// backing and forwarding log
 						if rf.nextIndex[s] > 1 {
@@ -612,10 +607,8 @@ func (rf *Raft) appendEntries() {
 						rf.matchIndex[s] = len(rf.log) - 1
 						break
 					} else {
-						if rf.currentTerm.SmallerAndSet(appendEntriesReply.Term) {
-							atomic.StoreInt32(&rf.votedFor, -1)
-							rf.role.Write(Follower)
-							rf.alive = true
+						if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
+							rf.toFollowerByTermUpgrade(oldTerm)
 						} else if rf.role.IsEqual(Leader) {
 							// backing and forwarding log
 							rf.nextIndex[s]--
@@ -652,6 +645,13 @@ func (rf *Raft) appendEntries() {
 			break
 		}
 	}
+}
+
+func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
+	tools.Debug(dTerm, "S%v upgrade Term (%v > %v)\n", rf.me, rf.currentTerm.Read(), oldTerm)
+	atomic.StoreInt32(&rf.votedFor, -1)
+	rf.role.Write(Follower)
+	rf.alive = true
 }
 
 // Make

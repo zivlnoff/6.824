@@ -21,16 +21,17 @@ func (rvInt32 *ConcurrentVarInt32) Write(v int32) {
 	rvInt32.val = v
 }
 
-func (rvInt32 *ConcurrentVarInt32) SmallerAndSet(v int32) bool {
+func (rvInt32 *ConcurrentVarInt32) SmallerAndSet(v int32) (int32, bool) {
 	rvInt32.Lock()
 	defer rvInt32.Unlock()
 
-	if rvInt32.val < v {
+	old := rvInt32.val
+	if old < v {
 		rvInt32.val = v
-		return true
+		return old, true
 	}
 
-	return false
+	return old, false
 }
 
 func (rvInt32 *ConcurrentVarInt32) BiggerAndSet(v int32) bool {
