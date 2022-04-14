@@ -354,6 +354,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = args.LeaderCommit
 		}
 
+		tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg{
@@ -365,6 +366,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
+			tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
 		}
 	}
 }
@@ -442,25 +444,28 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		kill := make(chan bool, 1)
 		if rf.role.IsEqual(Leader) || rf.alive {
 			rf.alive = false
 		} else {
-			go rf.election()
+			go rf.election(kill)
 		}
 
 		time.Sleep(ElectionTimeout + time.Duration(rand.Int()%(ElectionTimeoutSwellCeiling+1))*time.Millisecond)
+		kill <- true
 	}
 }
 
 // election
 // choose a new leader
-func (rf *Raft) election() {
+func (rf *Raft) election(kill chan bool) {
 	rf.currentTerm.AddOne()
 	rf.role.Write(Candidate)
 	rf.votedFor = rf.me
+	tools.Debug(dTerm, "S%v Converting to Candidate, calling election T:%v\n", rf.me, rf.currentTerm.Read())
 
-	mu := sync.Mutex{}
-	poll := 1
+	poll := new(tools.ConcurrentVarInt32)
+	poll.AddOne()
 
 	requestVote := RequestVoteArgs{
 		Term:         rf.currentTerm.Read(),
@@ -471,15 +476,7 @@ func (rf *Raft) election() {
 
 	replies := make([]RequestVoteReply, len(rf.peers))
 
-	// wait for receiving all replies
-	waitGroup := sync.WaitGroup{}
-	waitGroup.Add(len(rf.peers) - 1)
-
 	for server, _ := range rf.peers {
-		if !rf.role.IsEqual(Candidate) {
-			return
-		}
-
 		if server == int(rf.me) {
 			continue
 		}
@@ -487,41 +484,47 @@ func (rf *Raft) election() {
 		go func(s int) {
 			ok := rf.sendRequestVote(s, &requestVote, &replies[s])
 
-			if ok && rf.role.IsEqual(Candidate) {
+			if ok {
 				if !replies[s].VoteGranted {
 					if rf.currentTerm.SmallerAndSet(replies[s].Term) {
 						rf.role.Write(Follower)
 						atomic.StoreInt32(&rf.votedFor, -1)
 						rf.alive = true
 					}
-				} else if replies[s].Term == rf.currentTerm.Read() {
-					tools.Debug(dVote, "S%v <- S%v Got vote\n", rf.me, s)
-					mu.Lock()
-					poll++
-					mu.Unlock()
+				} else {
+					tools.Debug(dVote, "S%v <- S%v Got vote(T%v)\n", rf.me, s, replies[s].Term)
+					poll.AddOne()
 				}
 			}
 
-			waitGroup.Done()
 		}(server)
 	}
 
-	waitGroup.Wait()
-	if poll > len(rf.peers)/2 {
-		tools.Debug(dLeader, "S%v Achieved Majority for T%v (%v), converting to Leader\n", rf.me, rf.currentTerm.Read(), poll)
+	for {
+		select {
+		case <-kill:
+			return
+		//election lose
+		case <-time.After(2 * time.Microsecond):
+			if poll.Read() > int32(len(rf.peers)/2) {
+				tools.Debug(dLeader, "S%v Achieved Majority for T%v (%v), converting to Leader\n", rf.me, rf.currentTerm.Read(), poll.Read())
 
-		rf.role.Write(Leader)
-		rf.nextIndex = make([]int, len(rf.peers))
-		for server, _ := range rf.nextIndex {
-			rf.nextIndex[server] = len(rf.log)
-		}
+				rf.role.Write(Leader)
+				rf.matchIndex = make([]int, len(rf.peers))
+				rf.nextIndex = make([]int, len(rf.peers))
+				for server, _ := range rf.nextIndex {
+					rf.nextIndex[server] = len(rf.log)
+				}
 
-		rf.matchIndex = make([]int, len(rf.peers))
-
-		for rf.role.IsEqual(Leader) {
-			tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
-			rf.heartBeat()
-			time.Sleep(HeartBeatPeriod)
+				go func() {
+					for rf.role.IsEqual(Leader) {
+						tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
+						rf.heartBeat()
+						time.Sleep(HeartBeatPeriod)
+					}
+				}()
+				return
+			}
 		}
 	}
 }
@@ -644,6 +647,7 @@ func (rf *Raft) appendEntries() {
 					SnapshotTerm:  0,
 					SnapshotIndex: 0,
 				}
+				tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
 			}
 			break
 		}
