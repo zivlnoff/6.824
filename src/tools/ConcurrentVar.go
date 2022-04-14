@@ -10,6 +10,10 @@ type ConcurrentVarInt32 struct {
 	val int32
 }
 
+func NewConcurrentVarInt32(v int32) *ConcurrentVarInt32 {
+	return &ConcurrentVarInt32{val: v}
+}
+
 func (rvInt32 *ConcurrentVarInt32) Read() int32 {
 	return atomic.LoadInt32(&rvInt32.val)
 }

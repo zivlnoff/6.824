@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"6.824/labgob"
 	"6.824/tools"
+	"bytes"
+	"log"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -151,12 +154,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm.Read())
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v log:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor, rf.log)
 }
 
 // readPersist
@@ -167,17 +172,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int32
+	var votedFor int32
+	var logEntries = new([]LogEntry)
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(logEntries) != nil {
+		log.Fatal("restore data error...")
+	} else {
+		rf.currentTerm = tools.NewConcurrentVarInt32(currentTerm)
+		rf.votedFor = votedFor
+		rf.log = *logEntries
+	}
+	tools.Debug(dPersist, "S%v restore T:%v VF:%v log:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor, rf.log)
 }
 
 //
@@ -256,6 +264,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.alive = true
 		reply.Term = rf.currentTerm.Read()
 		reply.VoteGranted = true
+		rf.persist()
 	} else {
 		reply.VoteGranted = false
 	}
@@ -326,6 +335,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if oldTerm, ok := rf.currentTerm.SmallerAndSet(args.Term); ok {
 		rf.toFollowerByTermUpgrade(oldTerm)
+		rf.persist()
 	} else {
 		rf.alive = true
 		rf.role.Write(Follower)
@@ -342,8 +352,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 	// 4. Append any new Entries not already in the log
 	reply.Success = true
-	rf.log = rf.log[:args.PrevLogIndex+1]
-	rf.log = append(rf.log, args.Entries[:]...)
+	if args.Entries != nil {
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = append(rf.log, args.Entries[:]...)
+		rf.persist()
+	}
 
 	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
@@ -404,6 +417,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// committed to the Raft log, since the leader may fail
 		// or lose an election.
 		rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
+		rf.persist()
 
 		rf.workerCond.L.Lock()
 		rf.goAhead = true
@@ -461,6 +475,7 @@ func (rf *Raft) election(kill chan bool) {
 	rf.currentTerm.AddOne()
 	rf.role.Write(Candidate)
 	rf.votedFor = rf.me
+	rf.persist()
 	tools.Debug(dTerm, "S%v Converting to Candidate, calling election T:%v\n", rf.me, rf.currentTerm.Read())
 
 	poll := new(tools.ConcurrentVarInt32)
@@ -487,6 +502,7 @@ func (rf *Raft) election(kill chan bool) {
 				if !replies[s].VoteGranted {
 					if oldTerm, ok := rf.currentTerm.SmallerAndSet(replies[s].Term); ok {
 						rf.toFollowerByTermUpgrade(oldTerm)
+						rf.persist()
 					}
 				} else {
 					tools.Debug(dVote, "S%v <- S%v Got vote(T%v)\n", rf.me, s, replies[s].Term)
@@ -594,7 +610,6 @@ func (rf *Raft) appendEntries() {
 					rf.log[rf.nextIndex[s]-1].Term,
 					rf.log[rf.nextIndex[s]:],
 					rf.commitIndex}
-
 				appendEntriesReply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
@@ -642,7 +657,7 @@ func (rf *Raft) appendEntries() {
 				}
 				tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
 			}
-			break
+			return
 		}
 	}
 }
@@ -652,6 +667,7 @@ func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
 	atomic.StoreInt32(&rf.votedFor, -1)
 	rf.role.Write(Follower)
 	rf.alive = true
+	rf.persist()
 }
 
 // Make
@@ -672,9 +688,15 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = int32(me)
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = new(tools.ConcurrentVarInt32)
-	rf.votedFor = -1
-	rf.log = make([]LogEntry, 1)
+	if persister.RaftStateSize() > 0 {
+		// initialize from state persisted before a crash
+		rf.readPersist(persister.ReadRaftState())
+	} else {
+		rf.currentTerm = new(tools.ConcurrentVarInt32)
+		rf.votedFor = -1
+		rf.log = make([]LogEntry, 1)
+		rf.persist()
+	}
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -686,8 +708,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.applyCh = applyCh
 
 	rf.workerCond = sync.NewCond(new(sync.Mutex))
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
