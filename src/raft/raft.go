@@ -36,7 +36,7 @@ const (
 
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 200
-	HeartBeatPeriod             = 140 * time.Millisecond
+	HeartBeatPeriod             = 160 * time.Millisecond
 
 	ColvTZziDebug = true
 )
