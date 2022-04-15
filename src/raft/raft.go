@@ -21,6 +21,7 @@ import (
 	"6.824/labgob"
 	"6.824/tools"
 	"bytes"
+	"fmt"
 	"log"
 	"math/rand"
 	//	"bytes"
@@ -118,16 +119,20 @@ type Raft struct {
 	alive bool // should read the latest data
 
 	// Log Replication
+	tail    int
 	applyCh chan ApplyMsg
 
 	// appendEntriesWorker
-	goAhead    bool
-	workerCond *sync.Cond
+	computeCommit     bool
+	computeCommitCond sync.Cond
+	goAhead           []bool
+	workerCond        []sync.Cond
 }
 
 // LogEntry
 // todo
 type LogEntry struct {
+	Index   int
 	Term    int32
 	Command interface{}
 }
@@ -258,7 +263,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 
-	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+	if (args.LastLogTerm > rf.log[rf.tail].Term || (args.LastLogTerm == rf.log[rf.tail].Term && args.LastLogIndex >= rf.tail)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
 		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 		rf.role.Write(Follower)
 		rf.alive = true
@@ -338,47 +343,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	} else {
 		rf.alive = true
+		// if Candidate, so -> Follower
 		rf.role.Write(Follower)
 	}
 
 	reply.Term = rf.currentTerm.Read()
 
-	// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
-		reply.Success = false
-		return
-	}
-
-	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
-	// 4. Append any new Entries not already in the log
-	reply.Success = true
-	if args.Entries != nil {
-		rf.log = rf.log[:args.PrevLogIndex+1]
-		rf.log = append(rf.log, args.Entries[:]...)
-		rf.persist()
-	}
-
-	// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > len(rf.log)-1 {
-			rf.commitIndex = len(rf.log) - 1
-		} else {
-			rf.commitIndex = args.LeaderCommit
+	switch args.Entries {
+	case nil:
+		// heartBeats
+		if rf.tail >= args.LeaderCommit && rf.log[args.LeaderCommit].Term == args.Term {
+			if rf.commitIndex < args.LeaderCommit {
+				rf.commitIndex = args.LeaderCommit
+				tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
+				rf.apply()
+			}
+		}
+		reply.Success = true
+	default:
+		// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
+		if args.PrevLogIndex >= rf.tail+1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+			reply.Success = false
+			return
 		}
 
-		tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
-		for rf.lastApplied < rf.commitIndex {
-			rf.lastApplied++
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       rf.log[rf.lastApplied].Command,
-				CommandIndex:  rf.lastApplied,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  0,
-				SnapshotIndex: 0,
+		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
+		// 4. Append any new Entries not already in the log
+		reply.Success = true
+		if args.Entries != nil {
+			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.log = append(rf.log, args.Entries[:]...)
+			rf.tail = args.Entries[len(args.Entries)-1].Index
+			rf.persist()
+		}
+
+		// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
+		if args.LeaderCommit > rf.commitIndex {
+			if args.LeaderCommit > rf.tail {
+				rf.commitIndex = rf.tail
+			} else {
+				rf.commitIndex = args.LeaderCommit
 			}
-			tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
+
+			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
+			rf.apply()
 		}
 	}
 }
@@ -416,13 +424,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// there is no guarantee that this command will ever be
 		// committed to the Raft log, since the leader may fail
 		// or lose an election.
-		rf.log = append(rf.log, LogEntry{rf.currentTerm.Read(), command})
+		rf.tail++
+		rf.log = append(rf.log, LogEntry{rf.tail, rf.currentTerm.Read(), command})
+		rf.matchIndex[rf.me] = rf.tail
 		rf.persist()
 
-		rf.workerCond.L.Lock()
-		rf.goAhead = true
-		rf.workerCond.L.Unlock()
-		rf.workerCond.Signal()
+		for server, _ := range rf.peers {
+			if server == int(rf.me) {
+				continue
+			}
+
+			rf.workerCond[server].L.Lock()
+			rf.goAhead[server] = true
+			fmt.Printf("S%v make S%v's goAhead = true\n", rf.me, server)
+			rf.workerCond[server].Signal()
+			rf.workerCond[server].L.Unlock()
+		}
 	}
 
 	return index, term, isLeader
@@ -484,8 +501,8 @@ func (rf *Raft) election(kill chan bool) {
 	requestVote := RequestVoteArgs{
 		Term:         rf.currentTerm.Read(),
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
-		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+		LastLogIndex: rf.tail,
+		LastLogTerm:  rf.log[rf.tail].Term,
 	}
 
 	replies := make([]RequestVoteReply, len(rf.peers))
@@ -522,12 +539,19 @@ func (rf *Raft) election(kill chan bool) {
 			if poll.Read() > int32(len(rf.peers)/2) {
 				tools.Debug(dLeader, "S%v Achieved Majority for T%v (%v), converting to Leader\n", rf.me, rf.currentTerm.Read(), poll.Read())
 
-				rf.role.Write(Leader)
+				rf.tail = len(rf.log) - 1
 				rf.matchIndex = make([]int, len(rf.peers))
 				rf.nextIndex = make([]int, len(rf.peers))
-				for server, _ := range rf.nextIndex {
-					rf.nextIndex[server] = len(rf.log)
+				rf.computeCommit = false
+				rf.computeCommitCond = *sync.NewCond(&sync.Mutex{})
+				rf.goAhead = make([]bool, len(rf.peers))
+				rf.workerCond = make([]sync.Cond, len(rf.peers))
+				for server, _ := range rf.peers {
+					rf.nextIndex[server] = rf.tail + 1
+					rf.workerCond[server] = *sync.NewCond(&sync.Mutex{})
 				}
+				rf.startAppendEntriesWorker()
+				rf.role.Write(Leader)
 
 				go func() {
 					for rf.role.IsEqual(Leader) {
@@ -550,53 +574,24 @@ func (rf *Raft) heartBeat() {
 		}
 
 		go func(s int) {
-			appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
-				rf.me,
-				rf.nextIndex[s] - 1,
-				rf.log[rf.nextIndex[s]-1].Term,
-				rf.log[rf.nextIndex[s]:],
-				rf.commitIndex}
+			appendEntriesArgs := AppendEntriesArgs{Term: rf.currentTerm.Read(),
+				LeaderId:     rf.me,
+				LeaderCommit: rf.commitIndex}
 
 			appendEntriesReply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
 			if ok {
-				if appendEntriesReply.Success {
-					rf.nextIndex[s] = len(rf.log)
-					rf.matchIndex[s] = len(rf.log) - 1
-				} else {
-					if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok {
-						rf.toFollowerByTermUpgrade(oldTerm)
-					} else if rf.role.IsEqual(Leader) {
-						// backing and forwarding log
-						if rf.nextIndex[s] > 1 {
-							rf.nextIndex[s]--
-						}
-					}
+				if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok {
+					rf.toFollowerByTermUpgrade(oldTerm)
 				}
 			}
 		}(server)
 	}
 }
 
-func (rf *Raft) appendEntriesWorker() {
-	for true {
-		rf.workerCond.L.Lock()
-
-		for !rf.goAhead {
-			rf.workerCond.Wait()
-		}
-
-		rf.workerCond.L.Unlock()
-		rf.goAhead = false
-		rf.appendEntries()
-	}
-}
-
-func (rf *Raft) appendEntries() {
-	mu := sync.Mutex{}
-	shortFall := len(rf.peers) / 2
-
+func (rf *Raft) startAppendEntriesWorker() {
+	// set up goroutine for each p2p AppendEntries RPC
 	for server, _ := range rf.peers {
 		if server == int(rf.me) {
 			continue
@@ -604,29 +599,50 @@ func (rf *Raft) appendEntries() {
 
 		go func(s int) {
 			for rf.role.IsEqual(Leader) {
-				appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
-					rf.me,
-					rf.nextIndex[s] - 1,
-					rf.log[rf.nextIndex[s]-1].Term,
-					rf.log[rf.nextIndex[s]:],
-					rf.commitIndex}
-				appendEntriesReply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
+				rf.workerCond[s].L.Lock()
+				for !rf.goAhead[s] {
+					fmt.Printf("S%v is waiting...\n", s)
+					rf.workerCond[s].Wait()
+				}
+				fmt.Printf("S%v sending appendEntry to S%v\n", rf.me, s)
+				rf.goAhead[s] = false
+				rf.workerCond[s].L.Unlock()
 
-				if ok {
-					if appendEntriesReply.Success {
-						mu.Lock()
-						shortFall--
-						mu.Unlock()
-						rf.nextIndex[s] = len(rf.log)
-						rf.matchIndex[s] = len(rf.log) - 1
+				// when trigger a new round AppendEntries RPC?
+				for rf.role.IsEqual(Leader) {
+					fmt.Println("-----------")
+					appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
+						rf.me,
+						rf.nextIndex[s] - 1,
+						rf.log[rf.nextIndex[s]-1].Term,
+						rf.log[rf.nextIndex[s]:],
+						rf.commitIndex}
+
+					if appendEntriesArgs.Entries == nil || len(appendEntriesArgs.Entries) == 0 {
 						break
-					} else {
-						if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
-							rf.toFollowerByTermUpgrade(oldTerm)
-						} else if rf.role.IsEqual(Leader) {
-							// backing and forwarding log
-							rf.nextIndex[s]--
+					}
+
+					appendEntriesReply := AppendEntriesReply{}
+					ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
+
+					if ok {
+						if appendEntriesReply.Success {
+							rf.nextIndex[s] = appendEntriesArgs.Entries[len(appendEntriesArgs.Entries)-1].Index + 1
+							rf.matchIndex[s] = rf.nextIndex[s] - 1
+
+							fmt.Printf("S%v acquire computedCommitCond lock\n", s)
+							rf.computeCommitCond.L.Lock()
+							rf.computeCommit = true
+							rf.computeCommitCond.Signal()
+							rf.computeCommitCond.L.Unlock()
+							break
+						} else {
+							if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
+								rf.toFollowerByTermUpgrade(oldTerm)
+							} else if rf.role.IsEqual(Leader) {
+								// backing and forwarding log
+								rf.nextIndex[s]--
+							}
 						}
 					}
 				}
@@ -634,32 +650,31 @@ func (rf *Raft) appendEntries() {
 		}(server)
 	}
 
-	// wait majority Follower return true or become Follower
-	for rf.role.IsEqual(Leader) {
-		// Don't have these loops execute continuously without pausing, since that will
-		// slow your implementation enough that it fails tests
-		time.Sleep(10 * time.Millisecond)
-
-		if shortFall <= 0 {
-			//Should we double-check
-			rf.commitIndex = len(rf.log) - 1
-			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v\n", rf.me, rf.commitIndex)
-			for rf.lastApplied < rf.commitIndex {
-				rf.lastApplied++
-				rf.applyCh <- ApplyMsg{
-					CommandValid:  true,
-					Command:       rf.log[rf.lastApplied].Command,
-					CommandIndex:  rf.lastApplied,
-					SnapshotValid: false,
-					Snapshot:      nil,
-					SnapshotTerm:  0,
-					SnapshotIndex: 0,
-				}
-				tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
+	// set up a goroutine to find the CommitIndex
+	go func() {
+		for rf.role.IsEqual(Leader) {
+			rf.computeCommitCond.L.Lock()
+			if !rf.computeCommit {
+				rf.computeCommitCond.Wait()
 			}
-			return
+			rf.computeCommit = false
+			rf.computeCommitCond.L.Unlock()
+
+			// Don't have these loops execute continuously without pausing, since that will
+			// slow your implementation enough that it fails tests
+			time.Sleep(10 * time.Millisecond)
+
+			curMaxCommit := tools.Quick_select(rf.matchIndex, len(rf.peers))
+
+			if curMaxCommit <= rf.commitIndex {
+				continue
+			}
+
+			rf.commitIndex = curMaxCommit
+			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v\n", rf.me, rf.commitIndex)
+			rf.apply()
 		}
-	}
+	}()
 }
 
 func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
@@ -668,6 +683,22 @@ func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
 	rf.role.Write(Follower)
 	rf.alive = true
 	rf.persist()
+}
+
+func (rf *Raft) apply() {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  true,
+			Command:       rf.log[rf.lastApplied].Command,
+			CommandIndex:  rf.lastApplied,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
+		tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
+	}
 }
 
 // Make
@@ -705,15 +736,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.role.Write(Follower)
 	rf.alive = false
 
+	rf.tail = len(rf.log) - 1
 	rf.applyCh = applyCh
-
-	rf.workerCond = sync.NewCond(new(sync.Mutex))
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
-	// worker queue for AppendEntries
-	go rf.appendEntriesWorker()
 
 	return rf
 }
