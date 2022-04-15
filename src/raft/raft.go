@@ -21,7 +21,6 @@ import (
 	"6.824/labgob"
 	"6.824/tools"
 	"bytes"
-	"fmt"
 	"log"
 	"math/rand"
 	//	"bytes"
@@ -436,7 +435,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 			rf.workerCond[server].L.Lock()
 			rf.goAhead[server] = true
-			fmt.Printf("S%v make S%v's goAhead = true\n", rf.me, server)
 			rf.workerCond[server].Signal()
 			rf.workerCond[server].L.Unlock()
 		}
@@ -550,8 +548,8 @@ func (rf *Raft) election(kill chan bool) {
 					rf.nextIndex[server] = rf.tail + 1
 					rf.workerCond[server] = *sync.NewCond(&sync.Mutex{})
 				}
-				rf.startAppendEntriesWorker()
 				rf.role.Write(Leader)
+				rf.startAppendEntriesWorker()
 
 				go func() {
 					for rf.role.IsEqual(Leader) {
@@ -601,16 +599,13 @@ func (rf *Raft) startAppendEntriesWorker() {
 			for rf.role.IsEqual(Leader) {
 				rf.workerCond[s].L.Lock()
 				for !rf.goAhead[s] {
-					fmt.Printf("S%v is waiting...\n", s)
 					rf.workerCond[s].Wait()
 				}
-				fmt.Printf("S%v sending appendEntry to S%v\n", rf.me, s)
 				rf.goAhead[s] = false
 				rf.workerCond[s].L.Unlock()
 
 				// when trigger a new round AppendEntries RPC?
 				for rf.role.IsEqual(Leader) {
-					fmt.Println("-----------")
 					appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
 						rf.me,
 						rf.nextIndex[s] - 1,
@@ -630,7 +625,6 @@ func (rf *Raft) startAppendEntriesWorker() {
 							rf.nextIndex[s] = appendEntriesArgs.Entries[len(appendEntriesArgs.Entries)-1].Index + 1
 							rf.matchIndex[s] = rf.nextIndex[s] - 1
 
-							fmt.Printf("S%v acquire computedCommitCond lock\n", s)
 							rf.computeCommitCond.L.Lock()
 							rf.computeCommit = true
 							rf.computeCommitCond.Signal()
