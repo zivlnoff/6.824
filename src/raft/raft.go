@@ -39,7 +39,7 @@ const (
 
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
-	HeartBeatPeriod             = 120 * time.Millisecond
+	HeartBeatPeriod             = 160 * time.Millisecond
 
 	ColvTZziDebug = true
 )
@@ -262,7 +262,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 
-	if (args.LastLogTerm > rf.log[rf.tail.Read()].Term || (args.LastLogTerm == rf.log[rf.tail.Read()].Term && args.LastLogIndex >= rf.tail.Read())) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
 		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 		rf.role.Write(Follower)
 		rf.alive = true
@@ -560,13 +560,7 @@ func (rf *Raft) election(kill chan bool) {
 				rf.role.Write(Leader)
 				rf.startAppendEntriesWorker()
 
-				go func() {
-					for rf.role.IsEqual(Leader) {
-						tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
-						rf.heartBeat()
-						time.Sleep(HeartBeatPeriod)
-					}
-				}()
+				rf.heartBeat()
 				return
 			}
 		}
@@ -581,17 +575,25 @@ func (rf *Raft) heartBeat() {
 		}
 
 		go func(s int) {
-			appendEntriesArgs := AppendEntriesArgs{Term: rf.currentTerm.Read(),
-				LeaderId:     rf.me,
-				LeaderCommit: rf.commitIndex}
+			for rf.role.IsEqual(Leader) {
+				tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
+				appendEntriesArgs := AppendEntriesArgs{
+					Term:         rf.currentTerm.Read(),
+					LeaderId:     rf.me,
+					LeaderCommit: rf.commitIndex}
 
-			appendEntriesReply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
+				appendEntriesReply := AppendEntriesReply{}
 
-			if ok {
-				if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok {
-					rf.toFollowerByTermUpgrade(oldTerm)
-				}
+				go func() {
+					ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
+					if ok {
+						if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok {
+							rf.toFollowerByTermUpgrade(oldTerm)
+						}
+					}
+				}()
+
+				time.Sleep(HeartBeatPeriod)
 			}
 		}(server)
 	}
@@ -689,6 +691,7 @@ func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
 
 func (rf *Raft) apply() {
 	for rf.lastApplied < rf.commitIndex {
+		// todo concurrent question???
 		rf.lastApplied++
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  true,
