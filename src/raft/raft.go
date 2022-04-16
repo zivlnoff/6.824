@@ -425,6 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// or lose an election.
 
 		// CAS spin is the most efficient
+		// todo a share pri-queue may be the best solution
 		logIndex := rf.tail.AddOne()
 		for {
 			if rf.log[len(rf.log)-1].Index == logIndex-1 {
