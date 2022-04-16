@@ -66,14 +66,48 @@ func (rvInt32 *ConcurrentVarInt32) AddOne() {
 }
 
 type ConcurrentVarInt struct {
-	sync.Mutex
-	Val int
+	sync.RWMutex
+	val int
+}
+
+func NewConcurrentVarInt(v int) *ConcurrentVarInt {
+	return &ConcurrentVarInt{val: v}
 }
 
 func (rvInt *ConcurrentVarInt) Lock() {
-	rvInt.Lock()
+	rvInt.RWMutex.Lock()
 }
 
 func (rvInt *ConcurrentVarInt) UnLock() {
-	rvInt.Unlock()
+	rvInt.RWMutex.Unlock()
+}
+
+func (rvInt *ConcurrentVarInt) RLock() {
+	rvInt.RWMutex.RLock()
+}
+
+func (rvInt *ConcurrentVarInt) RUnLock() {
+	rvInt.RWMutex.RUnlock()
+}
+func (rvInt *ConcurrentVarInt) Read() int {
+	rvInt.RLock()
+	defer rvInt.RUnLock()
+
+	return rvInt.val
+}
+
+func (rvInt *ConcurrentVarInt) Write(v int) {
+	rvInt.Lock()
+	defer rvInt.Unlock()
+
+	rvInt.val = v
+}
+
+func (rvInt *ConcurrentVarInt) AddOne() int {
+	rvInt.Lock()
+	defer rvInt.Unlock()
+
+	rvInt.val++
+
+	return rvInt.val
 }

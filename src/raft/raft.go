@@ -118,7 +118,7 @@ type Raft struct {
 	alive bool // should read the latest data
 
 	// Log Replication
-	tail    int
+	tail    *tools.ConcurrentVarInt
 	applyCh chan ApplyMsg
 
 	// appendEntriesWorker
@@ -262,7 +262,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 
-	if (args.LastLogTerm > rf.log[rf.tail].Term || (args.LastLogTerm == rf.log[rf.tail].Term && args.LastLogIndex >= rf.tail)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+	if (args.LastLogTerm > rf.log[rf.tail.Read()].Term || (args.LastLogTerm == rf.log[rf.tail.Read()].Term && args.LastLogIndex >= rf.tail.Read())) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
 		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 		rf.role.Write(Follower)
 		rf.alive = true
@@ -351,7 +351,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	switch args.Entries {
 	case nil:
 		// heartBeats
-		if rf.tail >= args.LeaderCommit && rf.log[args.LeaderCommit].Term == args.Term {
+		if rf.tail.Read() >= args.LeaderCommit && rf.log[args.LeaderCommit].Term == args.Term {
 			if rf.commitIndex < args.LeaderCommit {
 				rf.commitIndex = args.LeaderCommit
 				tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
@@ -361,7 +361,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 	default:
 		// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
-		if args.PrevLogIndex >= rf.tail+1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		if args.PrevLogIndex >= rf.tail.Read()+1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
 			reply.Success = false
 			return
 		}
@@ -372,14 +372,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.Entries != nil {
 			rf.log = rf.log[:args.PrevLogIndex+1]
 			rf.log = append(rf.log, args.Entries[:]...)
-			rf.tail = args.Entries[len(args.Entries)-1].Index
+			rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
 			rf.persist()
 		}
 
 		// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
-			if args.LeaderCommit > rf.tail {
-				rf.commitIndex = rf.tail
+			if args.LeaderCommit > rf.tail.Read() {
+				rf.commitIndex = rf.tail.Read()
 			} else {
 				rf.commitIndex = args.LeaderCommit
 			}
@@ -423,9 +423,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// there is no guarantee that this command will ever be
 		// committed to the Raft log, since the leader may fail
 		// or lose an election.
-		rf.tail++
-		rf.log = append(rf.log, LogEntry{rf.tail, rf.currentTerm.Read(), command})
-		rf.matchIndex[rf.me] = rf.tail
+
+		// CAS spin is the most efficient
+		logIndex := rf.tail.AddOne()
+		for {
+			if rf.log[len(rf.log)-1].Index == logIndex-1 {
+				rf.log = append(rf.log, LogEntry{logIndex, rf.currentTerm.Read(), command})
+				break
+			}
+		}
+
+		rf.matchIndex[rf.me] = rf.tail.Read()
 		rf.persist()
 
 		for server, _ := range rf.peers {
@@ -499,8 +507,8 @@ func (rf *Raft) election(kill chan bool) {
 	requestVote := RequestVoteArgs{
 		Term:         rf.currentTerm.Read(),
 		CandidateId:  rf.me,
-		LastLogIndex: rf.tail,
-		LastLogTerm:  rf.log[rf.tail].Term,
+		LastLogIndex: rf.tail.Read(),
+		LastLogTerm:  rf.log[rf.tail.Read()].Term,
 	}
 
 	replies := make([]RequestVoteReply, len(rf.peers))
@@ -537,7 +545,7 @@ func (rf *Raft) election(kill chan bool) {
 			if poll.Read() > int32(len(rf.peers)/2) {
 				tools.Debug(dLeader, "S%v Achieved Majority for T%v (%v), converting to Leader\n", rf.me, rf.currentTerm.Read(), poll.Read())
 
-				rf.tail = len(rf.log) - 1
+				rf.tail.Write(len(rf.log) - 1)
 				rf.matchIndex = make([]int, len(rf.peers))
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.computeCommit = false
@@ -545,7 +553,7 @@ func (rf *Raft) election(kill chan bool) {
 				rf.goAhead = make([]bool, len(rf.peers))
 				rf.workerCond = make([]sync.Cond, len(rf.peers))
 				for server, _ := range rf.peers {
-					rf.nextIndex[server] = rf.tail + 1
+					rf.nextIndex[server] = rf.tail.Read() + 1
 					rf.workerCond[server] = *sync.NewCond(&sync.Mutex{})
 				}
 				rf.role.Write(Leader)
@@ -729,7 +737,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.role.Write(Follower)
 	rf.alive = false
 
-	rf.tail = len(rf.log) - 1
+	rf.tail = tools.NewConcurrentVarInt(len(rf.log) - 1)
 	rf.applyCh = applyCh
 
 	// start ticker goroutine to start elections
