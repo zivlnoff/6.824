@@ -38,8 +38,8 @@ const (
 	Candidate int32 = 3
 
 	ElectionTimeout             = 300 * time.Millisecond
-	ElectionTimeoutSwellCeiling = 200
-	HeartBeatPeriod             = 160 * time.Millisecond
+	ElectionTimeoutSwellCeiling = 150
+	HeartBeatPeriod             = 120 * time.Millisecond
 
 	ColvTZziDebug = true
 )
@@ -341,10 +341,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.toFollowerByTermUpgrade(oldTerm)
 		rf.persist()
 	} else {
-		rf.alive = true
 		// if Candidate, so -> Follower
 		rf.role.Write(Follower)
 	}
+	rf.alive = true
 
 	reply.Term = rf.currentTerm.Read()
 
@@ -675,7 +675,6 @@ func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
 	tools.Debug(dTerm, "S%v upgrade Term (%v > %v)\n", rf.me, rf.currentTerm.Read(), oldTerm)
 	atomic.StoreInt32(&rf.votedFor, -1)
 	rf.role.Write(Follower)
-	rf.alive = true
 	rf.persist()
 }
 
