@@ -333,6 +333,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Receiver implementation
 	// 1. Reply false if Term < currentTerm
+	reply.ConflictIndex = -1
 	if args.Term < rf.currentTerm.Read() {
 		reply.Term = rf.currentTerm.Read()
 		reply.Success = false
@@ -341,14 +342,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if oldTerm, ok := rf.currentTerm.SmallerAndSet(args.Term); ok {
 		rf.toFollowerByTermUpgrade(oldTerm)
-		rf.persist()
 	} else {
 		// if Candidate, so -> Follower
 		rf.role.Write(Follower)
 	}
 	rf.alive = true
-
-	reply.Term = rf.currentTerm.Read()
 
 	switch args.Entries {
 	case nil:
@@ -360,7 +358,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.apply()
 			}
 		}
-		reply.Success = true
 	default:
 		// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
 		conflictIndex, term, has := rf.ifConflict(args)
@@ -373,13 +370,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 		// 4. Append any new Entries not already in the log
-		reply.Success = true
-		if args.Entries != nil {
-			rf.log = rf.log[:args.PrevLogIndex+1]
-			rf.log = append(rf.log, args.Entries[:]...)
-			rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
-			rf.persist()
-		}
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = append(rf.log, args.Entries[:]...)
+		rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
+		rf.persist()
 
 		// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
@@ -393,6 +387,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
 			rf.apply()
 		}
+		reply.Success = true
 	}
 }
 
@@ -635,12 +630,15 @@ func (rf *Raft) startAppendEntriesWorker() {
 					}
 
 					appendEntriesReply := AppendEntriesReply{}
+					// synchronized possible
 					ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
 					if ok {
 						if appendEntriesReply.Success {
+							tools.Debug(dLeader, "S%v receive S%v success reply %v entries %v\n", rf.me, s, appendEntriesArgs.Entries, appendEntriesReply)
 							rf.nextIndex[s] = appendEntriesArgs.Entries[len(appendEntriesArgs.Entries)-1].Index + 1
 							rf.matchIndex[s] = rf.nextIndex[s] - 1
+							tools.Debug(dLeader, "S%v matchIndex[] %v\n", rf.me, rf.matchIndex)
 
 							rf.computeCommitCond.L.Lock()
 							rf.computeCommit = true
@@ -650,8 +648,9 @@ func (rf *Raft) startAppendEntriesWorker() {
 						} else {
 							if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
 								rf.toFollowerByTermUpgrade(oldTerm)
-							} else {
+							} else if appendEntriesReply.ConflictIndex != -1 /*solve delay message in the air*/ {
 								rf.backNextIndex(&rf.nextIndex[s], &appendEntriesReply)
+								tools.Debug(dLeader, "S%v set S%v nextIndex %v appendEntriesReply %v\n", rf.me, s, rf.nextIndex[s], appendEntriesReply)
 							}
 						}
 					}
@@ -674,7 +673,9 @@ func (rf *Raft) startAppendEntriesWorker() {
 			// slow your implementation enough that it fails tests
 			time.Sleep(10 * time.Millisecond)
 
-			curMaxCommit := tools.Quick_select(rf.matchIndex, len(rf.peers))
+			copyData := make([]int, len(rf.peers))
+			copy(copyData, rf.matchIndex)
+			curMaxCommit := tools.Quick_select(copyData, len(rf.peers))
 
 			if curMaxCommit <= rf.commitIndex {
 				continue
