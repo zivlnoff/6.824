@@ -165,7 +165,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v log:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor, rf.log)
+	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor)
+	tools.Debug(dLog2, "S%v saved Log %v\n", rf.me, rf.log)
 }
 
 // readPersist
@@ -322,8 +323,9 @@ type AppendEntriesArgs struct {
 // AppendEntriesReply
 // correspond to AppendEntriesArgs
 type AppendEntriesReply struct {
-	Term    int32 // currentTerm, for leader to update itself
-	Success bool  // true if follower contained entry matching PrevLogIndex and PrevLogTerm
+	ConflictIndex int   // conflict Index, always sit together with Term
+	Term          int32 // currentTerm, for leader to update itself
+	Success       bool  // true if follower contained entry matching PrevLogIndex and PrevLogTerm
 }
 
 // AppendEntries
@@ -361,7 +363,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 	default:
 		// 2. Reply false if log doesn't contain an entry at PrevLogIndex whose Term matches preLogTerm
-		if args.PrevLogIndex >= rf.tail.Read()+1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		conflictIndex, term, has := rf.ifConflict(args)
+		if has {
+			reply.ConflictIndex = conflictIndex
+			reply.Term = term
 			reply.Success = false
 			return
 		}
@@ -378,8 +383,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
-			if args.LeaderCommit > rf.tail.Read() {
-				rf.commitIndex = rf.tail.Read()
+			len := len(rf.log)
+			if args.LeaderCommit > len {
+				rf.commitIndex = len
 			} else {
 				rf.commitIndex = args.LeaderCommit
 			}
@@ -644,9 +650,8 @@ func (rf *Raft) startAppendEntriesWorker() {
 						} else {
 							if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
 								rf.toFollowerByTermUpgrade(oldTerm)
-							} else if rf.role.IsEqual(Leader) {
-								// backing and forwarding log
-								rf.nextIndex[s]--
+							} else {
+								rf.backNextIndex(&rf.nextIndex[s], &appendEntriesReply)
 							}
 						}
 					}
@@ -702,7 +707,36 @@ func (rf *Raft) apply() {
 			SnapshotTerm:  0,
 			SnapshotIndex: 0,
 		}
-		tools.Debug(dLog2, "S%v applied %v to its state, log %v\n", rf.me, rf.lastApplied, rf.log)
+	}
+}
+
+func (rf *Raft) ifConflict(args *AppendEntriesArgs) (int, int32, bool) {
+	len := len(rf.log)
+	if args.PrevLogIndex >= len {
+		return len, -1, true
+	} else if args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		firstIndexOfTerm := args.PrevLogIndex - 1
+		term := rf.log[firstIndexOfTerm+1].Term
+		for rf.log[firstIndexOfTerm].Term == term {
+			firstIndexOfTerm--
+		}
+		return firstIndexOfTerm + 1, term, true
+	}
+	return 0, 0, false
+}
+func (rf *Raft) backNextIndex(nextIndex *int, reply *AppendEntriesReply) {
+	if reply.Term == -1 {
+		*nextIndex = reply.ConflictIndex
+	} else {
+		if rf.log[reply.ConflictIndex].Term != reply.Term {
+			*nextIndex = reply.ConflictIndex
+		} else {
+			next := reply.ConflictIndex + 1
+			for rf.log[next].Term == reply.Term {
+				next++
+			}
+			*nextIndex = next
+		}
 	}
 }
 
