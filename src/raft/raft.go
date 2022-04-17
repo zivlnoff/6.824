@@ -21,8 +21,10 @@ import (
 	"6.824/labgob"
 	"6.824/tools"
 	"bytes"
-	"log"
+	"fmt"
 	"math/rand"
+	"runtime"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -39,7 +41,7 @@ const (
 
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
-	HeartBeatPeriod             = 160 * time.Millisecond
+	HeartBeatPeriod             = 130 * time.Millisecond
 
 	ColvTZziDebug = true
 )
@@ -184,7 +186,6 @@ func (rf *Raft) readPersist(data []byte) {
 	var logEntries = new([]LogEntry)
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil || d.Decode(logEntries) != nil {
-		log.Fatal("restore data error...")
 	} else {
 		rf.currentTerm = tools.NewConcurrentVarInt32(currentTerm)
 		rf.votedFor = votedFor
@@ -262,14 +263,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 		Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
-
+	reply.Term = rf.currentTerm.Read()
 	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
-		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 		rf.role.Write(Follower)
 		rf.alive = true
-		reply.Term = rf.currentTerm.Read()
-		reply.VoteGranted = true
 		rf.persist()
+		reply.VoteGranted = true
+		tools.Debug(dVote, "S%v Granting Vote to S%v at T%v\n", rf.me, args.CandidateId, rf.currentTerm.Read())
 	} else {
 		reply.VoteGranted = false
 	}
@@ -333,7 +333,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Receiver implementation
 	// 1. Reply false if Term < currentTerm
-	reply.ConflictIndex = -1
 	if args.Term < rf.currentTerm.Read() {
 		reply.Term = rf.currentTerm.Read()
 		reply.Success = false
@@ -343,7 +342,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if oldTerm, ok := rf.currentTerm.SmallerAndSet(args.Term); ok {
 		rf.toFollowerByTermUpgrade(oldTerm)
 	} else {
-		// if Candidate, so -> Follower
 		rf.role.Write(Follower)
 	}
 	rf.alive = true
@@ -413,6 +411,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	fmt.Println(runtime.NumGoroutine())
 	// Your code here (2B).
 	if !rf.role.IsEqual(Leader) {
 		isLeader = false
@@ -478,7 +477,7 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
@@ -568,16 +567,17 @@ func (rf *Raft) election(kill chan bool) {
 	}
 }
 
+// heartBeat
+// sends heartBeat message to all the other servers to establish its authority and prevent new elections
 func (rf *Raft) heartBeat() {
-	// sends heartBeat message to all the other servers to establish its authority and prevent new elections
 	for server, _ := range rf.peers {
 		if server == int(rf.me) {
 			continue
 		}
 
 		go func(s int) {
-			for rf.role.IsEqual(Leader) {
-				tools.Debug(dTImer, "S%v Leader, checking heartbeats\n", rf.me)
+			for !rf.killed() && rf.role.IsEqual(Leader) {
+				tools.Debug(dTImer, "S%v Leader, checking heartbeats T%v\n", rf.me, rf.currentTerm.Read())
 				appendEntriesArgs := AppendEntriesArgs{
 					Term:         rf.currentTerm.Read(),
 					LeaderId:     rf.me,
@@ -608,7 +608,7 @@ func (rf *Raft) startAppendEntriesWorker() {
 		}
 
 		go func(s int) {
-			for rf.role.IsEqual(Leader) {
+			for !rf.killed() && rf.role.IsEqual(Leader) {
 				rf.workerCond[s].L.Lock()
 				for !rf.goAhead[s] {
 					rf.workerCond[s].Wait()
@@ -617,7 +617,7 @@ func (rf *Raft) startAppendEntriesWorker() {
 				rf.workerCond[s].L.Unlock()
 
 				// when trigger a new round AppendEntries RPC?
-				for rf.role.IsEqual(Leader) {
+				for !rf.killed() && rf.role.IsEqual(Leader) {
 					appendEntriesArgs := AppendEntriesArgs{rf.currentTerm.Read(),
 						rf.me,
 						rf.nextIndex[s] - 1,
@@ -635,10 +635,8 @@ func (rf *Raft) startAppendEntriesWorker() {
 
 					if ok {
 						if appendEntriesReply.Success {
-							tools.Debug(dLeader, "S%v receive S%v success reply %v entries %v\n", rf.me, s, appendEntriesArgs.Entries, appendEntriesReply)
 							rf.nextIndex[s] = appendEntriesArgs.Entries[len(appendEntriesArgs.Entries)-1].Index + 1
 							rf.matchIndex[s] = rf.nextIndex[s] - 1
-							tools.Debug(dLeader, "S%v matchIndex[] %v\n", rf.me, rf.matchIndex)
 
 							rf.computeCommitCond.L.Lock()
 							rf.computeCommit = true
@@ -648,9 +646,8 @@ func (rf *Raft) startAppendEntriesWorker() {
 						} else {
 							if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
 								rf.toFollowerByTermUpgrade(oldTerm)
-							} else if appendEntriesReply.ConflictIndex != -1 /*solve delay message in the air*/ {
+							} else {
 								rf.backNextIndex(&rf.nextIndex[s], &appendEntriesReply)
-								tools.Debug(dLeader, "S%v set S%v nextIndex %v appendEntriesReply %v\n", rf.me, s, rf.nextIndex[s], appendEntriesReply)
 							}
 						}
 					}
@@ -661,7 +658,7 @@ func (rf *Raft) startAppendEntriesWorker() {
 
 	// set up a goroutine to find the CommitIndex
 	go func() {
-		for rf.role.IsEqual(Leader) {
+		for !rf.killed() && rf.role.IsEqual(Leader) {
 			rf.computeCommitCond.L.Lock()
 			if !rf.computeCommit {
 				rf.computeCommitCond.Wait()
