@@ -43,7 +43,6 @@ const (
 	CASSleepTime = 1 * time.Millisecond
 	ApplyPeriod  = 2 * time.Millisecond
 )
-
 const (
 	dClient  tools.LogTopic = "CLNT"
 	dCommit  tools.LogTopic = "CMIT"
@@ -365,10 +364,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 		// 4. Append any new Entries not already in the log
-		rf.log = rf.log[:args.PrevLogIndex+1]
-		rf.log = append(rf.log, args.Entries[:]...)
-		rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
-		rf.persist()
+		if args.Term >= rf.currentTerm.Read() /* prevent stale send */ {
+			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.log = append(rf.log, args.Entries[:]...)
+			rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
+			rf.persist()
+		}
 
 		// 5. If LeaderCommit > commitIndex, set commitIndex = min(LeaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
