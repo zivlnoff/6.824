@@ -21,10 +21,7 @@ import (
 	"6.824/labgob"
 	"6.824/tools"
 	"bytes"
-	"fmt"
 	"math/rand"
-	"runtime"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -43,7 +40,8 @@ const (
 	ElectionTimeoutSwellCeiling = 150
 	HeartBeatPeriod             = 130 * time.Millisecond
 
-	ColvTZziDebug = true
+	CASSleepTime = 1 * time.Millisecond
+	ApplyPeriod  = 2 * time.Millisecond
 )
 
 const (
@@ -112,8 +110,14 @@ type Raft struct {
 	lastApplied int // index of the highest log entry applied to state machine (initialized to 0, increases monotonically)
 
 	// Volatile state on leaders (Reinitialized after election)
-	nextIndex  []int // for each server, index of the next log entry to send to that server(initialized to leader last log index + 1)
-	matchIndex []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
+	nextIndex         []int // for each server, index of the next log entry to send to that server(initialized to leader last log index + 1)
+	matchIndex        []int // for each server, index of the highest log entry known to be replicated on server(initialized to 0, increases monotonically)
+	muAppend          int32 // for AppendEntries
+	muCommit          int32 // for CommitCompute
+	computeCommit     bool
+	computeCommitCond sync.Cond
+	goAhead           []bool
+	workerCond        []sync.Cond
 
 	// Leader election
 	role  *tools.ConcurrentVarInt32
@@ -122,12 +126,6 @@ type Raft struct {
 	// Log Replication
 	tail    *tools.ConcurrentVarInt
 	applyCh chan ApplyMsg
-
-	// appendEntriesWorker
-	computeCommit     bool
-	computeCommitCond sync.Cond
-	goAhead           []bool
-	workerCond        []sync.Cond
 }
 
 // LogEntry
@@ -353,7 +351,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.commitIndex < args.LeaderCommit {
 				rf.commitIndex = args.LeaderCommit
 				tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
-				rf.apply()
 			}
 		}
 	default:
@@ -383,7 +380,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 
 			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v (Follower)\n", rf.me, rf.commitIndex)
-			rf.apply()
 		}
 		reply.Success = true
 	}
@@ -411,7 +407,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	fmt.Println(runtime.NumGoroutine())
 	// Your code here (2B).
 	if !rf.role.IsEqual(Leader) {
 		isLeader = false
@@ -496,7 +491,7 @@ func (rf *Raft) ticker() {
 // election
 // choose a new leader
 func (rf *Raft) election(kill chan bool) {
-	rf.currentTerm.AddOne()
+	newTerm := rf.currentTerm.AddOne()
 	rf.role.Write(Candidate)
 	rf.votedFor = rf.me
 	rf.persist()
@@ -558,9 +553,8 @@ func (rf *Raft) election(kill chan bool) {
 					rf.workerCond[server] = *sync.NewCond(&sync.Mutex{})
 				}
 				rf.role.Write(Leader)
-				rf.startAppendEntriesWorker()
-
-				rf.heartBeat()
+				rf.heartBeat(newTerm)
+				rf.startAppendEntriesWorker(newTerm)
 				return
 			}
 		}
@@ -569,14 +563,14 @@ func (rf *Raft) election(kill chan bool) {
 
 // heartBeat
 // sends heartBeat message to all the other servers to establish its authority and prevent new elections
-func (rf *Raft) heartBeat() {
+func (rf *Raft) heartBeat(term int32) {
 	for server, _ := range rf.peers {
 		if server == int(rf.me) {
 			continue
 		}
 
 		go func(s int) {
-			for !rf.killed() && rf.role.IsEqual(Leader) {
+			for !rf.killed() && rf.role.IsEqual(Leader) && term == rf.currentTerm.Read() {
 				tools.Debug(dTImer, "S%v Leader, checking heartbeats T%v\n", rf.me, rf.currentTerm.Read())
 				appendEntriesArgs := AppendEntriesArgs{
 					Term:         rf.currentTerm.Read(),
@@ -600,7 +594,7 @@ func (rf *Raft) heartBeat() {
 	}
 }
 
-func (rf *Raft) startAppendEntriesWorker() {
+func (rf *Raft) startAppendEntriesWorker(term int32) {
 	// set up goroutine for each p2p AppendEntries RPC
 	for server, _ := range rf.peers {
 		if server == int(rf.me) {
@@ -608,7 +602,7 @@ func (rf *Raft) startAppendEntriesWorker() {
 		}
 
 		go func(s int) {
-			for !rf.killed() && rf.role.IsEqual(Leader) {
+			for !rf.killed() && rf.role.IsEqual(Leader) && term == rf.currentTerm.Read() {
 				rf.workerCond[s].L.Lock()
 				for !rf.goAhead[s] {
 					rf.workerCond[s].Wait()
@@ -633,6 +627,15 @@ func (rf *Raft) startAppendEntriesWorker() {
 					// synchronized possible
 					ok := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
+					for !atomic.CompareAndSwapInt32(&rf.muAppend, 1, 0) {
+						time.Sleep(CASSleepTime)
+					}
+
+					if term != rf.currentTerm.Read() /* prevent the stable reply*/ {
+						atomic.AddInt32(&rf.muAppend, 1)
+						return
+					}
+
 					if ok {
 						if appendEntriesReply.Success {
 							rf.nextIndex[s] = appendEntriesArgs.Entries[len(appendEntriesArgs.Entries)-1].Index + 1
@@ -642,15 +645,19 @@ func (rf *Raft) startAppendEntriesWorker() {
 							rf.computeCommit = true
 							rf.computeCommitCond.Signal()
 							rf.computeCommitCond.L.Unlock()
+
+							atomic.AddInt32(&rf.muAppend, 1)
 							break
 						} else {
 							if oldTerm, ok := rf.currentTerm.SmallerAndSet(appendEntriesReply.Term); ok == true {
 								rf.toFollowerByTermUpgrade(oldTerm)
-							} else {
+							} else if term >= appendEntriesReply.Term /* prevent stale upgrade Reply*/ {
 								rf.backNextIndex(&rf.nextIndex[s], &appendEntriesReply)
 							}
 						}
 					}
+
+					atomic.AddInt32(&rf.muAppend, 1)
 				}
 			}
 		}(server)
@@ -658,7 +665,7 @@ func (rf *Raft) startAppendEntriesWorker() {
 
 	// set up a goroutine to find the CommitIndex
 	go func() {
-		for !rf.killed() && rf.role.IsEqual(Leader) {
+		for !rf.killed() && rf.role.IsEqual(Leader) && term == rf.currentTerm.Read() {
 			rf.computeCommitCond.L.Lock()
 			if !rf.computeCommit {
 				rf.computeCommitCond.Wait()
@@ -666,21 +673,32 @@ func (rf *Raft) startAppendEntriesWorker() {
 			rf.computeCommit = false
 			rf.computeCommitCond.L.Unlock()
 
-			// Don't have these loops execute continuously without pausing, since that will
-			// slow your implementation enough that it fails tests
-			time.Sleep(10 * time.Millisecond)
+			for !atomic.CompareAndSwapInt32(&rf.muCommit, 1, 0) {
+				time.Sleep(CASSleepTime)
+			}
+
+			// double check
+			if term != rf.currentTerm.Read() {
+				atomic.AddInt32(&rf.muCommit, 1)
+				return
+			}
 
 			copyData := make([]int, len(rf.peers))
 			copy(copyData, rf.matchIndex)
 			curMaxCommit := tools.Quick_select(copyData, len(rf.peers))
 
 			if curMaxCommit <= rf.commitIndex {
+				atomic.AddInt32(&rf.muCommit, 1)
 				continue
 			}
 
 			rf.commitIndex = curMaxCommit
 			tools.Debug(dCommit, "S%v commit entries from previous terms, lastCommit %v\n", rf.me, rf.commitIndex)
-			rf.apply()
+
+			atomic.AddInt32(&rf.muCommit, 1)
+			// Don't have these loops execute continuously without pausing, since that will
+			// slow your implementation enough that it fails tests
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 }
@@ -692,19 +710,21 @@ func (rf *Raft) toFollowerByTermUpgrade(oldTerm int32) {
 	rf.persist()
 }
 
-func (rf *Raft) apply() {
-	for rf.lastApplied < rf.commitIndex {
-		// todo concurrent question???
-		rf.lastApplied++
-		rf.applyCh <- ApplyMsg{
-			CommandValid:  true,
-			Command:       rf.log[rf.lastApplied].Command,
-			CommandIndex:  rf.lastApplied,
-			SnapshotValid: false,
-			Snapshot:      nil,
-			SnapshotTerm:  0,
-			SnapshotIndex: 0,
+func (rf *Raft) apply2StateMachine() {
+	for !rf.killed() {
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       rf.log[rf.lastApplied].Command,
+				CommandIndex:  rf.lastApplied,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  0,
+				SnapshotIndex: 0,
+			}
 		}
+		time.Sleep(ApplyPeriod)
 	}
 }
 
@@ -722,6 +742,7 @@ func (rf *Raft) ifConflict(args *AppendEntriesArgs) (int, int32, bool) {
 	}
 	return 0, 0, false
 }
+
 func (rf *Raft) backNextIndex(nextIndex *int, reply *AppendEntriesReply) {
 	if reply.Term == -1 {
 		*nextIndex = reply.ConflictIndex
@@ -769,6 +790,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
+	rf.muAppend = 1
+	rf.muCommit = 1
 	rf.role = new(tools.ConcurrentVarInt32)
 	rf.role.Write(Follower)
 	rf.alive = false
@@ -778,6 +801,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	// start ticker goroutine to apply log 2 state machine
+	go rf.apply2StateMachine()
 
 	return rf
 }

@@ -61,8 +61,8 @@ func (rvInt32 *ConcurrentVarInt32) IsEqual(v int32) bool {
 	return false
 }
 
-func (rvInt32 *ConcurrentVarInt32) AddOne() {
-	atomic.AddInt32(&rvInt32.val, 1)
+func (rvInt32 *ConcurrentVarInt32) AddOne() int32 {
+	return atomic.AddInt32(&rvInt32.val, 1)
 }
 
 type ConcurrentVarInt struct {
