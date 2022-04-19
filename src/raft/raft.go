@@ -98,7 +98,8 @@ type Raft struct {
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
 	currentTerm *tools.ConcurrentVarInt32 // latest Term server has seen (initialized to 0 on first boot, increases monotonically)
 	votedFor    int32                     // CandidateId that received vote in current Term (or null if none)
-	log         []LogEntry                // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
+	muLogAppend sync.Mutex
+	log         []LogEntry // log Entries; each entry contains command for state machine, and Term when entry was received by leader(first index is 1) ??
 
 	// Volatile state on all servers
 	commitIndex int // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -266,7 +267,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date,
 	// If the logs end with the same term, then whichever log is longer is more up-to-date.
 	reply.Term = rf.currentTerm.Read()
-	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) && (atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
+	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term ||
+		(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= rf.log[len(rf.log)-1].Index)) &&
+		(atomic.CompareAndSwapInt32(&rf.votedFor, -1, args.CandidateId) || rf.votedFor == args.CandidateId) {
 		rf.role.Write(Follower)
 		rf.alive = true
 		rf.persist()
@@ -370,7 +373,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 4. Append any new Entries not already in the log
 		if args.Term >= rf.currentTerm.Read() /* prevent stale send */ {
 			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.muLogAppend.Lock()
 			rf.log = append(rf.log, args.Entries[:]...)
+			rf.muLogAppend.Unlock()
 			rf.tail.Write(args.Entries[len(args.Entries)-1].Index)
 			rf.persist()
 		}
@@ -423,7 +428,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		logIndex := rf.tail.AddOne()
 		for {
 			if rf.log[len(rf.log)-1].Index == logIndex-1 {
-				rf.log = append(rf.log, LogEntry{logIndex, rf.currentTerm.Read(), command})
+				rf.muLogAppend.Lock()
+				if rf.role.Read() == Leader /* double check prevent concurrent */ {
+					rf.log = append(rf.log, LogEntry{logIndex, rf.currentTerm.Read(), command})
+				}
+				rf.muLogAppend.Unlock()
 				break
 			}
 		}
@@ -774,6 +783,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			dead:        0,
 			currentTerm: tools.NewConcurrentVarInt32(0),
 			votedFor:    -1,
+			muLogAppend: sync.Mutex{},
 			log:         make([]LogEntry, 1),
 			muAppend:    1,
 			muCommit:    1,
@@ -786,15 +796,16 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	} else {
 		// initialize from state persisted before a crash
 		rf = &Raft{
-			peers:     peers,
-			persister: persister,
-			me:        int32(me),
-			dead:      0,
-			muAppend:  1,
-			muCommit:  1,
-			role:      tools.NewConcurrentVarInt32(Follower),
-			alive:     false,
-			applyCh:   applyCh,
+			peers:       peers,
+			persister:   persister,
+			me:          int32(me),
+			dead:        0,
+			muLogAppend: sync.Mutex{},
+			muAppend:    1,
+			muCommit:    1,
+			role:        tools.NewConcurrentVarInt32(Follower),
+			alive:       false,
+			applyCh:     applyCh,
 		}
 		rf.readPersist(persister.ReadRaftState())
 		rf.tail = tools.NewConcurrentVarInt(len(rf.log) - 1)
