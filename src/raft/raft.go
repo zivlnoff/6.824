@@ -52,8 +52,8 @@ const (
 	dError   tools.LogTopic = "ERRO"
 	dInfo    tools.LogTopic = "INFO"
 	dLeader  tools.LogTopic = "LEAD"
-	dLog     tools.LogTopic = "LOG1"
-	dLog2    tools.LogTopic = "LOG2"
+	dLog1    tools.LogTopic = "LOG1"
+	dApply   tools.LogTopic = "APPY"
 	dPersist tools.LogTopic = "PERS"
 	dSnap    tools.LogTopic = "SNAP"
 	dTerm    tools.LogTopic = "TERM"
@@ -680,22 +680,23 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	rf.Snapshot(args.LastIncludedIndex, args.Data)
-
-	rf.applyCh <- ApplyMsg{
-		CommandValid:  false,
-		Command:       nil,
-		CommandIndex:  0,
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  int(args.LastIncludedTerm),
-		SnapshotIndex: args.LastIncludedIndex,
+	if rf.Snapshot(args.LastIncludedIndex, args.Data) {
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  0,
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  int(args.Term),
+			SnapshotIndex: args.LastIncludedIndex,
+		}
 	}
 }
 
 func (rf *Raft) applyTicker() {
 	for !rf.killed() {
 		for rf.lastApplied < rf.commitIndex {
+			tools.Debug(dApply, "S%v apply Entry{index: %v, command: %v}\n", rf.me, rf.lastApplied, rf.log[rf.lastApplied-rf.lastIncludedIndex].Command)
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg{
 				CommandValid:  true,
@@ -801,7 +802,7 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(data)
 	//todo amend the Debug form
 	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor)
-	tools.Debug(dLog2, "S%v saved Log %v\n", rf.me, rf.log)
+	tools.Debug(dLog1, "S%v saved Log %v\n", rf.me, rf.log)
 }
 
 // readPersist
@@ -810,6 +811,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int32
@@ -832,6 +834,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	//todo amend the Debug form
 	tools.Debug(dPersist, "S%v restore T:%v VF:%v log:%v\n", rf.me, rf.currentTerm.Read(), rf.votedFor, rf.log)
+
+	if rf.persister.SnapshotSize() > 0 {
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  0,
+			SnapshotValid: true,
+			Snapshot:      rf.persister.ReadSnapshot(),
+			SnapshotTerm:  int(rf.lastIncludedTerm),
+			SnapshotIndex: rf.lastIncludedIndex,
+		}
+	}
 }
 
 // CondInstallSnapshot
@@ -845,12 +859,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
+func (rf *Raft) Snapshot(index int, snapshot []byte) bool {
 	rf.muSnapshot.Lock()
 	defer rf.muSnapshot.Unlock()
 
 	if index <= rf.lastIncludedIndex {
-		return
+		return false
 	}
 
 	w := new(bytes.Buffer)
@@ -860,22 +874,24 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	data := w.Bytes()
 
 	rf.muLog.Lock()
-	rf.log = make([]LogEntry, 0)
+	tailLog := make([]LogEntry, 0)
 	if index >= rf.log[len(rf.log)-1].Index {
-		rf.log = append(rf.log, LogEntry{
-			Index:   rf.lastIncludedIndex,
-			Term:    rf.lastIncludedTerm,
+		rf.log = append(tailLog, LogEntry{
+			Index:   index,
+			Term:    rf.log[index-rf.lastIncludedIndex].Term,
 			Command: nil,
 		})
 	} else {
-		rf.log = append(rf.log, rf.log[index-rf.lastIncludedIndex:]...)
+		rf.log = append(tailLog, rf.log[index-rf.lastIncludedIndex:]...)
 	}
-	rf.muLog.Unlock()
-
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[index-rf.lastIncludedIndex].Term
+	rf.muLog.Unlock()
+
 	rf.persist()
 
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), data)
 	tools.Debug(dSnap, "S%v saved snapshot {index:%v snapshot:%v}\n", rf.me, index, snapshot)
+
+	return true
 }
