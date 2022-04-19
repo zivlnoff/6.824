@@ -11,7 +11,10 @@ type ConcurrentVarInt32 struct {
 }
 
 func NewConcurrentVarInt32(v int32) *ConcurrentVarInt32 {
-	return &ConcurrentVarInt32{val: v}
+	return &ConcurrentVarInt32{
+		Mutex: sync.Mutex{},
+		val:   v,
+	}
 }
 
 func (rvInt32 *ConcurrentVarInt32) Read() int32 {
@@ -71,7 +74,10 @@ type ConcurrentVarInt struct {
 }
 
 func NewConcurrentVarInt(v int) *ConcurrentVarInt {
-	return &ConcurrentVarInt{val: v}
+	return &ConcurrentVarInt{
+		RWMutex: sync.RWMutex{},
+		val:     v,
+	}
 }
 
 func (rvInt *ConcurrentVarInt) Lock() {
