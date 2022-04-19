@@ -44,6 +44,7 @@ const (
 	CASSleepTime = 1 * time.Millisecond
 	ApplyPeriod  = 2 * time.Millisecond
 )
+
 const (
 	dClient  tools.LogTopic = "CLNT"
 	dCommit  tools.LogTopic = "CMIT"
@@ -73,7 +74,6 @@ const (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-//
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -88,7 +88,6 @@ type ApplyMsg struct {
 
 // Raft
 // A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
@@ -147,7 +146,6 @@ type LogEntry struct {
 // if it's ever committed. the second return value is the current
 // Term. the third return value is true if this server believes it is
 // the leader.
-//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
@@ -178,7 +176,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.workerCond[server].L.Unlock()
 		}
 	}
-
 	return index, term, isLeader
 }
 
@@ -192,7 +189,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	var rf *Raft
 	if persister == nil || persister.RaftStateSize() < 1 {
@@ -396,7 +392,6 @@ func (rf *Raft) startAppendEntriesWorker(term int32) {
 					}
 
 					appendEntriesReply := AppendEntriesReply{}
-					// synchronized possible
 					appendOk := rf.sendAppendEntries(s, &appendEntriesArgs, &appendEntriesReply)
 
 					for !atomic.CompareAndSwapInt32(&rf.muAppend, 1, 0) {
@@ -479,7 +474,6 @@ func (rf *Raft) startAppendEntriesWorker(term int32) {
 // RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
-//
 type RequestVoteArgs struct {
 	Term         int32 // candidate's Term
 	CandidateId  int32 // candidate requesting vote
@@ -490,13 +484,11 @@ type RequestVoteArgs struct {
 // RequestVoteReply
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	Term        int32 // currentTerm, for candidate to update itself
 	VoteGranted bool  // True means candidate received vote
 }
 
-//
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -524,7 +516,6 @@ type RequestVoteReply struct {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-//
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -532,7 +523,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // RequestVote
 // example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Be careful:
 	// 		if one server's current term is smaller than the other's, then it updates its current term to the large
@@ -746,7 +736,6 @@ func (rf *Raft) GetState() (int, bool) {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 }
