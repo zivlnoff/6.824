@@ -40,11 +40,12 @@ const (
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
 	HeartBeatPeriod             = 130 * time.Millisecond
+	AppendPeriod                = 30 * time.Millisecond
 
 	CASSleepTime        = 1 * time.Millisecond
 	ApplyPeriod         = 2 * time.Millisecond
-	AppendRPCTimeout    = 200 * time.Millisecond
-	SnapshotRPCTimeout  = 200 * time.Millisecond
+	AppendRPCTimeout    = 150 * time.Millisecond
+	SnapshotRPCTimeout  = 150 * time.Millisecond
 	NetworkCrashTimeout = 100 * time.Millisecond
 )
 
@@ -115,7 +116,7 @@ type Raft struct {
 	computeCommit     bool
 	computeCommitCond sync.Cond
 	goAhead           []bool
-	workerCond        []sync.Cond
+	muGoAhead         sync.Mutex
 
 	// Leader election
 	role  *tools.ConcurrentVarInt32
@@ -173,10 +174,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				continue
 			}
 
-			rf.workerCond[server].L.Lock()
 			rf.goAhead[server] = true
-			rf.workerCond[server].Broadcast()
-			rf.workerCond[server].L.Unlock()
 		}
 	}
 	return index, term, isLeader
@@ -207,8 +205,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			log:               make([]LogEntry, 1),
 			muAppend:          1,
 			muCommit:          1,
+			muGoAhead:         sync.Mutex{},
 			role:              tools.NewConcurrentVarInt32(Follower),
-			alive:             false,
+			alive:             true,
 			applyCh:           applyCh,
 			muInstallSnapshot: sync.Mutex{},
 		}
@@ -223,8 +222,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			muLog:             sync.Mutex{},
 			muAppend:          1,
 			muCommit:          1,
+			muGoAhead:         sync.Mutex{},
 			role:              tools.NewConcurrentVarInt32(Follower),
-			alive:             false,
+			alive:             true,
 			applyCh:           applyCh,
 			muInstallSnapshot: sync.Mutex{},
 		}
@@ -322,12 +322,13 @@ func (rf *Raft) leader(term int32) {
 	rf.computeCommit = false
 	rf.computeCommitCond = *sync.NewCond(&sync.Mutex{})
 	rf.goAhead = make([]bool, len(rf.peers))
-	rf.workerCond = make([]sync.Cond, len(rf.peers))
 
 	for server, _ := range rf.peers {
 		rf.nextIndex[server] = rf.log[len(rf.log)-1].Index + 1
-		rf.goAhead[server] = true
-		rf.workerCond[server] = *sync.NewCond(&sync.Mutex{})
+
+		rf.muGoAhead.Lock()
+		rf.goAhead[server] = false
+		rf.muGoAhead.Unlock()
 	}
 	rf.role.Write(Leader)
 
@@ -379,16 +380,17 @@ func (rf *Raft) startAppendEntriesWorker(term int32) {
 
 		go func(s int) {
 			for !rf.killed() && rf.role.IsEqual(Leader) && term == rf.currentTerm.Read() {
-				rf.workerCond[s].L.Lock()
 				for !rf.goAhead[s] {
-					rf.workerCond[s].Wait()
+					time.Sleep(AppendPeriod)
 				}
 
-				if term == rf.currentTerm.Read() {
-					rf.goAhead[s] = false
+				rf.muGoAhead.Lock()
+				if term < rf.currentTerm.Read() {
+					rf.muGoAhead.Unlock()
+					return
 				}
-
-				rf.workerCond[s].L.Unlock()
+				rf.goAhead[s] = false
+				rf.muGoAhead.Unlock()
 
 				for !rf.killed() && rf.role.IsEqual(Leader) {
 					appendRPC := make(chan bool, 1)
@@ -697,13 +699,13 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) sendInstallSnapshot(server int) {
-	data := rf.persister.ReadSnapshot()
 	rf.muLog.Lock()
+	lastIncludedIndex := rf.lastIncludedIndex
 	args := InstallSnapshotArgs{
 		Term:              rf.currentTerm.Read(),
-		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedIndex: lastIncludedIndex,
 		LastIncludedTerm:  rf.lastIncludedTerm,
-		Data:              data,
+		Data:              rf.persister.ReadSnapshot(),
 	}
 	rf.muLog.Unlock()
 
@@ -724,7 +726,7 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 			if oldTerm, ok := rf.currentTerm.SmallerAndSet(reply.Term); ok == true {
 				rf.toFollowerByTermUpgrade(oldTerm)
 			} else {
-				rf.nextIndex[server] = rf.lastIncludedIndex + 1
+				rf.nextIndex[server] = lastIncludedIndex + 1
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
 				tools.Debug(dLeader, "S%v <- S%v InstallSnapshot success NextIndex: %v MatchIndex: %v\n", rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 			}
@@ -933,6 +935,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.muLog.Lock()
+	if index <= rf.lastIncludedIndex {
+		rf.muLog.Unlock()
+		return
+	}
 
 	rf.snapshot(index, rf.log[index-rf.lastIncludedIndex].Term, snapshot)
 }
@@ -950,10 +956,10 @@ func (rf *Raft) snapshot(index int, term int32, snapshot []byte) {
 	}
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = term
-	rf.muLog.Unlock()
 
 	rf.persist()
 
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
+	rf.muLog.Unlock()
 	tools.Debug(dSnap, "S%v installed Snapshot LII: %v LIT: %v\n", rf.me, index, term)
 }
