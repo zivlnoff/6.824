@@ -17,14 +17,19 @@ func NewConcurrentVarInt32(v int32) *ConcurrentVarInt32 {
 	}
 }
 
-func (rvInt32 *ConcurrentVarInt32) Read() int32 {
+func (rvInt32 *ConcurrentVarInt32) Lock() {
+	rvInt32.Mutex.Lock()
+}
+
+func (rvInt32 *ConcurrentVarInt32) UnLock() {
+	rvInt32.Mutex.Unlock()
+}
+
+func (rvInt32 *ConcurrentVarInt32) ReadNoLock() int32 {
 	return atomic.LoadInt32(&rvInt32.val)
 }
 
-func (rvInt32 *ConcurrentVarInt32) Write(v int32) {
-	rvInt32.Lock()
-	defer rvInt32.Unlock()
-
+func (rvInt32 *ConcurrentVarInt32) WriteNoLock(v int32) {
 	rvInt32.val = v
 }
 
@@ -66,6 +71,10 @@ func (rvInt32 *ConcurrentVarInt32) IsEqual(v int32) bool {
 
 func (rvInt32 *ConcurrentVarInt32) AddOne() int32 {
 	return atomic.AddInt32(&rvInt32.val, 1)
+}
+
+func (rvInt32 *ConcurrentVarInt32) AddOneNoAtomic() {
+	rvInt32.val++
 }
 
 type ConcurrentVarInt struct {
