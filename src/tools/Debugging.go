@@ -34,7 +34,7 @@ func init() {
 	if err != nil {
 		log.Fatalf("%v\n", err)
 	}
-	fileName := rootedPath + "/" + "output.log"
+	fileName := rootedPath + "/" + "output.log" //+ time.Now().String()
 	file, err := os.Create(fileName)
 	if err != nil {
 		log.Fatalf("%v\n", err)

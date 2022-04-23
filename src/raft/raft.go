@@ -74,16 +74,13 @@ const (
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
-//
-// in part 2D you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
 type ApplyMsg struct {
+	// Apply
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
 
-	// For 2D:
+	// Snapshot
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
@@ -123,6 +120,7 @@ type Raft struct {
 	alive bool // should read the latest data
 
 	// Log Replication
+	muApply sync.Mutex
 	applyCh chan ApplyMsg
 
 	// Snapshot
@@ -208,6 +206,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			muGoAhead:         sync.Mutex{},
 			role:              tools.NewConcurrentVarInt32(Follower),
 			alive:             true,
+			muApply:           sync.Mutex{},
 			applyCh:           applyCh,
 			muInstallSnapshot: sync.Mutex{},
 		}
@@ -225,6 +224,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			muGoAhead:         sync.Mutex{},
 			role:              tools.NewConcurrentVarInt32(Follower),
 			alive:             true,
+			muApply:           sync.Mutex{},
 			applyCh:           applyCh,
 			muInstallSnapshot: sync.Mutex{},
 		}
@@ -436,7 +436,7 @@ func (rf *Raft) startAppendEntriesWorker(term int32) {
 								time.Sleep(CASSleepTime)
 							}
 
-							if term != rf.currentTerm.Read() /* prevent the stable reply*/ {
+							if term != rf.currentTerm.Read() /* prevent the stale leader*/ {
 								atomic.AddInt32(&rf.muAppend, 1)
 								return
 							}
@@ -751,6 +751,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.snapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
 
+	rf.muApply.Lock()
 	rf.applyCh <- ApplyMsg{
 		CommandValid:  false,
 		Command:       nil,
@@ -760,10 +761,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  int(args.LastIncludedTerm),
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-
-	rf.muLog.Lock()
 	rf.lastApplied = args.LastIncludedIndex
-	rf.muLog.Unlock()
+	rf.muApply.Unlock()
 
 	reply.Term = rf.currentTerm.Read()
 }
@@ -771,8 +770,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) applyTicker() {
 	for !rf.killed() {
 		for rf.lastApplied < rf.commitIndex {
-
+			rf.muApply.Lock()
 			rf.muLog.Lock()
+
 			rf.lastApplied++
 			command := rf.log[rf.lastApplied-rf.lastIncludedIndex].Command
 			rf.muLog.Unlock()
@@ -786,6 +786,8 @@ func (rf *Raft) applyTicker() {
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
+			rf.muApply.Unlock()
+
 			tools.Debug(dApply, "S%v apply Entry{index: %v, command: %v}\n", rf.me, rf.lastApplied, rf.log[rf.lastApplied-rf.lastIncludedIndex].Command)
 		}
 		time.Sleep(ApplyPeriod)
