@@ -40,17 +40,19 @@ const (
 	HEARTBEAT     = 1
 	APPENDENTRIES = 2
 
+	CheckPollPeriod             = 2 * time.Microsecond
 	ElectionTimeout             = 300 * time.Millisecond
 	ElectionTimeoutSwellCeiling = 150
-	HeartBeatPeriod             = 130 * time.Millisecond
-	AppendPeriod                = 30 * time.Millisecond
-	CheckPollPeriod             = 2 * time.Microsecond
+
+	HeartBeatPeriod = 130 * time.Millisecond
+	ApplyPeriod     = 2 * time.Millisecond
+
+	AppendPeriod     = 30 * time.Millisecond
+	AppendRPCTimeout = 150 * time.Millisecond
 
 	CASSleepTime        = 1 * time.Millisecond
-	ApplyPeriod         = 2 * time.Millisecond
-	AppendRPCTimeout    = 150 * time.Millisecond
-	SnapshotRPCTimeout  = 150 * time.Millisecond
 	NetworkCrashTimeout = 100 * time.Millisecond
+	SnapshotRPCTimeout  = 150 * time.Millisecond
 )
 
 const (
@@ -492,6 +494,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 2. If votedFor is null or CandidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
+	rf.currentTerm.Lock()
+	rf.role.Lock()
+	rf.muLog.Lock()
+	defer rf.currentTerm.Unlock()
+	defer rf.role.Unlock()
+	defer rf.muLog.Unlock()
+
 	reply.Term = rf.currentTerm.ReadNoLock()
 	if (args.LastLogTerm > rf.log[len(rf.log)-1].Term ||
 		(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= rf.log[len(rf.log)-1].Index)) &&
