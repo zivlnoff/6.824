@@ -819,11 +819,16 @@ func (rf *Raft) applyTicker() {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.currentTerm.Lock()
+	rf.role.Lock()
+
+	defer rf.currentTerm.Unlock()
+	defer rf.role.Unlock()
 
 	var term int
 	var isleader bool
-	term = int(rf.currentTerm.ReadNoLock())
 
+	term = int(rf.currentTerm.ReadNoLock())
 	isleader = rf.role.ReadNoLock() == Leader
 
 	return term, isleader
