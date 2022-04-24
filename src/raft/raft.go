@@ -344,8 +344,8 @@ func (rf *Raft) leader(term int32) {
 	rf.role.Lock()
 	rf.muLog.Lock()
 	rf.muGoAhead.Lock()
-	defer rf.role.UnLock()
 	defer rf.currentTerm.UnLock()
+	defer rf.role.UnLock()
 	defer rf.muLog.Unlock()
 	defer rf.muGoAhead.Unlock()
 
@@ -799,6 +799,8 @@ func (rf *Raft) applyTicker() {
 			rf.muApply.Lock()
 
 			if rf.lastApplied >= rf.commitIndex {
+				rf.muApply.Unlock()
+				rf.muLog.Unlock()
 				break
 			}
 
