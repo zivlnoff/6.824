@@ -356,6 +356,8 @@ func (rf *Raft) leader(term int32) {
 
 	for server, _ := range rf.peers {
 		rf.nextIndex[server] = rf.log[len(rf.log)-1].Index + 1
+		// dont't forget this
+		rf.matchIndex[server] = 0
 		rf.goAhead[server] = false
 
 		if server != int(rf.me) {
@@ -763,9 +765,8 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	rf.muLog.Lock()
 	rf.muApply.Lock()
-	defer rf.muLog.Unlock()
+	rf.muLog.Lock()
 	defer rf.muApply.Unlock()
 
 	if args.Term < rf.currentTerm.ReadNoLock() {
@@ -777,6 +778,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.snapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
+	rf.muLog.Unlock()
 
 	rf.applyCh <- ApplyMsg{
 		CommandValid:  false,
@@ -795,12 +797,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) applyTicker() {
 	for !rf.killed() {
 		for rf.lastApplied < rf.commitIndex {
-			rf.muLog.Lock()
 			rf.muApply.Lock()
+			rf.muLog.Lock()
 
 			if rf.lastApplied >= rf.commitIndex {
-				rf.muApply.Unlock()
 				rf.muLog.Unlock()
+				rf.muApply.Unlock()
 				break
 			}
 
@@ -922,6 +924,13 @@ func (rf *Raft) backNextIndex(nextIndex *int, reply *AppendEntriesReply) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
+	data := rf.encode()
+	rf.persister.SaveRaftState(data)
+	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v\n", rf.me, rf.currentTerm.ReadNoLock(), rf.votedFor)
+	tools.Debug(dLog1, "S%v saved LE - %v\n", rf.me, rf.log[len(rf.log)-1])
+}
+
+func (rf *Raft) encode() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm.ReadNoLock())
@@ -930,9 +939,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-	tools.Debug(dPersist, "S%v Saved State T:%v VF:%v\n", rf.me, rf.currentTerm.ReadNoLock(), rf.votedFor)
-	tools.Debug(dLog1, "S%v saved LE - %v\n", rf.me, rf.log[len(rf.log)-1])
+	return data
 }
 
 // readPersist
@@ -1003,8 +1010,8 @@ func (rf *Raft) snapshot(index int, term int32, snapshot []byte) {
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = term
 
-	rf.persist()
+	// Save both Raft state and K/V snapshot as a single atomic action, to help avoid them getting out of sync.
+	rf.persister.SaveStateAndSnapshot(rf.encode(), snapshot)
 
-	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
-	tools.Debug(dSnap, "S%v installed Snapshot LII: %v LIT: %v\n", rf.me, index, term)
+	tools.Debug(dSnap, "S%v Snapshot T: %v LE: %v LII: %v LIT: %v\n", rf.me, rf.currentTerm.ReadNoLock(), rf.log[len(rf.log)-1], index, term)
 }
