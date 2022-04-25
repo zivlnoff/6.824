@@ -770,10 +770,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	defer rf.muApply.Unlock()
 
 	if args.Term < rf.currentTerm.ReadNoLock() {
+		rf.muLog.Unlock()
 		return
 	}
 
 	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		rf.muLog.Unlock()
 		return
 	}
 
